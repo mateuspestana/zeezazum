@@ -1,6 +1,6 @@
 [project]
 name = "zeezazum"
-version = "0.1.0"
+version = "0.2.0"
 description = "Raspador universalizável de redes sociais (Playwright) a partir de uma tabela de URLs"
 requires-python = ">=3.11"
 license = "MIT"

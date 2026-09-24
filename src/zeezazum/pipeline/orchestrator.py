@@ -8,6 +8,8 @@ import asyncio
 import io
 import logging
 import random
+import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +26,32 @@ from zeezazum.storage import build_storage
 from zeezazum.storage.base import Storage
 
 logger = logging.getLogger(__name__)
+
+_STATE_KEY = "_state.duckdb"  # caminho relativo do estado dentro do Storage configurado
+
+
+def _open_state(config: ZeezazumConfig, storage: Storage) -> tuple[StateStore, Path | None]:
+    """DuckDB é embutido e precisa de um arquivo local pra abrir — com
+    `storage.backend: local` isso já É o arquivo final. Com `s3`, baixamos o
+    estado existente (se houver) pra um arquivo temporário, trabalhamos nele,
+    e devolvemos o caminho pra fazer upload de volta no final — assim o estado
+    de resume/raspagem incremental viaja com os dados no bucket, não fica preso
+    ao disco de uma instância EC2 específica."""
+    if config.storage.backend != "s3":
+        local_path = Path(config.storage.local.base_path) / _STATE_KEY
+        return StateStore(local_path), None
+
+    tmp_path = Path(tempfile.gettempdir()) / f"zeezazum_state_{uuid.uuid4().hex}.duckdb"
+    if storage.exists(_STATE_KEY):
+        tmp_path.write_bytes(storage.read_bytes(_STATE_KEY))
+    return StateStore(tmp_path), tmp_path
+
+
+def _sync_state_to_remote(storage: Storage, tmp_path: Path | None) -> None:
+    if tmp_path is None:
+        return  # backend local: StateStore já escreveu direto no destino final
+    storage.write_bytes(_STATE_KEY, tmp_path.read_bytes())
+    tmp_path.unlink(missing_ok=True)
 
 
 def _parse_since_date(value: str | None) -> datetime | None:
@@ -177,8 +205,7 @@ async def run_scrape(
     config: ZeezazumConfig, accounts: list[SocialAccount], *, extra_posts: int | None = None
 ) -> None:
     storage = build_storage(config.storage)
-    state_path = Path(config.storage.local.base_path) / "_state.duckdb"
-    state = StateStore(state_path)
+    state, state_tmp_path = _open_state(config, storage)
     since_date = _parse_since_date(config.scraping.since_date)
 
     queue: "asyncio.Queue[MediaTask | None]" = asyncio.Queue()
@@ -231,3 +258,4 @@ async def run_scrape(
         await queue.put(None)
         await consumer_task
         state.close()
+        _sync_state_to_remote(storage, state_tmp_path)

@@ -67,6 +67,81 @@ Copie `config.example.yaml` para `config.yaml` e ajuste `input.path` (a saída
 do passo 1), `scraping.max_posts`/`since_date`, e `storage.backend` (`local`
 ou `s3`).
 
+#### Salvando no S3 em vez de local
+
+Por padrão (`storage.backend: local`) tudo é gravado em disco, em
+`storage.local.base_path` (`output/` por padrão). Pra gravar direto no S3 —
+recomendado se o disco do servidor é pequeno, ou se você quer os dados
+acessíveis de outro lugar sem depender do EC2 continuar de pé — configure:
+
+```yaml
+storage:
+  backend: s3
+  s3:
+    bucket: meu-bucket-de-pesquisa
+    prefix: zeezazum/            # "pasta" dentro do bucket; pode deixar "" pra gravar na raiz
+    region: sa-east-1            # região do bucket
+```
+
+A estrutura gravada no bucket é a mesma que seria gravada localmente (mesma
+árvore `instagram/<handle>/posts.json`, `posts.parquet`, `media/...`, e o
+`_state.duckdb`), só que sob `s3://meu-bucket-de-pesquisa/zeezazum/...` em vez
+de `output/...`.
+
+**Passo a passo pra deixar isso funcionando:**
+
+1. **Instale o extra `s3`** (o `boto3` não vem por padrão, pra não obrigar
+   quem só usa `local` a instalar o SDK inteiro da AWS):
+   ```bash
+   uv pip install -e ".[s3]"
+   ```
+
+2. **Crie o bucket** (se ainda não existir), na região que você vai usar em
+   `storage.s3.region`:
+   ```bash
+   aws s3 mb s3://meu-bucket-de-pesquisa --region sa-east-1
+   ```
+
+3. **Dê credenciais AWS pro processo** — o Zeezazum usa a cadeia de
+   credenciais padrão do `boto3`, então qualquer uma dessas formas funciona
+   (da mais recomendada pra menos, quando rodando no EC2):
+   - **IAM role anexada à instância EC2** (melhor opção no servidor — não
+     precisa gerenciar chave nenhuma). Crie uma role com a policy abaixo e
+     anexe à instância em EC2 → Actions → Security → Modify IAM role.
+   - **Variáveis de ambiente**, se não for usar IAM role:
+     ```bash
+     export AWS_ACCESS_KEY_ID=...
+     export AWS_SECRET_ACCESS_KEY=...
+     export AWS_DEFAULT_REGION=sa-east-1
+     ```
+   - **`aws configure`** (grava em `~/.aws/credentials`), útil pra testar
+     localmente antes de ir pro EC2.
+
+4. **Permissões mínimas necessárias** (o Zeezazum só grava e lê objetos, não
+   lista o bucket) — policy IAM de exemplo, restrita ao prefixo configurado:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": ["s3:PutObject", "s3:GetObject"],
+         "Resource": "arn:aws:s3:::meu-bucket-de-pesquisa/zeezazum/*"
+       }
+     ]
+   }
+   ```
+
+5. **Teste antes de rodar em escala**: rode `zeezazum scrape` com um
+   `input.path` de 1-2 contas e confira no console da AWS (ou
+   `aws s3 ls s3://meu-bucket-de-pesquisa/zeezazum/instagram/ --recursive`)
+   que os arquivos apareceram.
+
+**Observação:** com `storage.backend: s3`, o `output/_state.duckdb` também vai
+pro bucket — ou seja, o estado de resume/raspagem incremental viaja com os
+dados, não fica preso ao disco de uma instância EC2 específica (útil se você
+trocar de servidor no meio do projeto).
+
 ### 4. Rodar a raspagem (no servidor, headless)
 
 ```bash
