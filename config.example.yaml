@@ -1,0 +1,36 @@
+platform: instagram
+
+input:
+  path: data/candidatos_instagram.parquet
+  # após `zeezazum prepare`, o output tem sempre as colunas row_id/handle/instagram_url
+  url_column: instagram_url
+  id_column: row_id
+
+scraping:
+  browser: chromium      # chromium | firefox
+  max_posts: 60
+  since_date: null       # ex: "2024-01-01" — também usado como corte no scroll
+  headless: true
+  session_file: sessions/instagram_storage_state.json
+  delay_between_profiles_seconds: [4, 10]
+  retry:
+    max_attempts: 3
+    backoff_seconds: 30
+
+storage:
+  backend: local          # local | s3
+  local:
+    base_path: output
+  s3:
+    bucket: null
+    prefix: zeezazum/
+    region: us-east-1
+
+media:
+  download_images: true
+  download_videos: true
+  max_concurrent_downloads: 4
+
+logging:
+  level: INFO
+  file: logs/zeezazum.log

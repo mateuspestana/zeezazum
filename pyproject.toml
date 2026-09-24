@@ -1,0 +1,32 @@
+[project]
+name = "zeezazum"
+version = "0.1.0"
+description = "Raspador universalizável de redes sociais (Playwright) a partir de uma tabela de URLs"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Matheus C. Pestana", email = "matheus.pestana@iesp.uerj.br" },
+]
+dependencies = [
+    "playwright>=1.47",
+    "polars>=1.9",
+    "duckdb>=1.1",
+    "pydantic>=2.9",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "httpx>=0.27",
+    "tenacity>=9.0",
+]
+
+[project.optional-dependencies]
+s3 = ["boto3>=1.35"]
+
+[project.scripts]
+zeezazum = "zeezazum.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zeezazum"]

@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+config.yaml
+config.test.yaml
+sessions/
+output/
+output_test/
+logs/
+*.duckdb
+*.duckdb.wal
+
+# dados de input/teste do usuário nunca vão pro repo (podem conter PII, ex. CPF)
+data/*
+!data/.gitkeep
