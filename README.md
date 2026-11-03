@@ -11,7 +11,7 @@ inspirado no [Zeeschuimer](https://github.com/digitalmethodsinitiative/zeeschuim
 Não depende de um dataset específico: qualquer tabela com identificador e texto
 contendo URLs ou handles pode alimentar a coleta.
 
-**Versão: 0.2.3** · [Histórico de mudanças](CHANGELOG.md)
+**Versão: 0.2.4** · [Histórico de mudanças](CHANGELOG.md)
 
 **Autor:** Matheus C. Pestana ([matheus.pestana@iesp.uerj.br](mailto:matheus.pestana@iesp.uerj.br)).
 

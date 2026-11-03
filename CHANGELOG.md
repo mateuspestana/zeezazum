@@ -5,6 +5,27 @@ Todas as mudanças notáveis deste projeto são documentadas aqui.
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e o versionamento segue [SemVer](https://semver.org/lang/pt-BR/).
 
+## [0.2.4] — 2026-11-03
+
+Sincronização com o [Zeeschuimer](https://github.com/digitalmethodsinitiative/zeeschuimer)
+(v1.14.3 e commits até 2026-10-21, módulo `instagram.js`).
+
+### Corrigido
+- Fallback genérico do parser passa a descartar nós de outros perfis (conteúdo
+  pré-buscado pelo Instagram no mesmo endpoint), mantendo posts em coautoria com
+  o perfil raspado. O número de nós descartados vai para o log.
+- Respostas de `explore_grid`, `injected_story_units` e `logging_client_events`
+  são ignoradas, como no Zeeschuimer.
+
+### Adicionado
+- Suporte ao shape Polaris: `display_uri` como fonte de imagem e tipo de mídia
+  derivado de `__typename` quando `media_type` não vem no nó.
+- Testes do parser com nós sintéticos.
+
+### Não portado
+- Regex de hashtag do 4CAT (exclui `_` e corta `#foo_bar`), prefixo `for (;;);`,
+  allowlist de views e novas views (`user_tagged`, `user_reposts`, `user_reels`).
+
 ## [0.2.3] — 2026-11-03
 
 Esta versão sucede diretamente a 0.2.1; não houve release 0.2.2.

@@ -24,6 +24,12 @@ from zeezazum.platforms.instagram.parser import parse_posts_from_payload
 logger = logging.getLogger(__name__)
 
 _API_URL_HINTS = ("graphql", "/api/v1/")
+# Endpoints que o Zeeschuimer descarta: conteúdo pré-carregado/ruído que não é da página.
+_IGNORED_URL_HINTS = (
+    "/api/v1/discover/web/explore_grid/",
+    "injected_story_units",
+    "logging_client_events",
+)
 _AUTH_PATHS = ("/accounts/login", "/challenge/", "/checkpoint/", "/accounts/suspended")
 
 
@@ -87,6 +93,8 @@ class InstagramScraper(BaseScraper):
                 return
             if not any(hint in url for hint in _API_URL_HINTS):
                 return
+            if any(hint in url for hint in _IGNORED_URL_HINTS):
+                return
             # sem filtro por content-type: o Instagram serve o GraphQL da timeline com
             # content-type que nem sempre contém "json" (text/javascript etc.); response.json()
             # já falha silenciosamente abaixo quando o corpo não é JSON.
@@ -95,7 +103,7 @@ class InstagramScraper(BaseScraper):
             except Exception:
                 # corpo não-JSON, resposta abortada, etc. — ignora silenciosamente
                 return
-            for post in parse_posts_from_payload(payload):
+            for post in parse_posts_from_payload(payload, handle):
                 captured.setdefault(post.shortcode, post)
 
         try:

@@ -26,11 +26,22 @@ mesmo sem aparecer de fato no feed.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from zeezazum.models import MediaItem, MediaKind, Post
+
+logger = logging.getLogger(__name__)
+
+# `__typename` do shape Polaris (mesmo mapeamento usado pelo Zeeschuimer/4CAT) quando
+# `media_type` numérico não vem no nó.
+_POLARIS_MEDIA_TYPE = {
+    "XIGPolarisPhotoMedia": 1,
+    "XIGPolarisVideoMedia": 2,
+    "XIGPolarisCarouselMedia": 8,
+}
 
 _TIMELINE_CONNECTION_KEYS = (
     "xdt_api__v1__feed__user_timeline_graphql_connection",
@@ -67,6 +78,20 @@ def _iter_timeline_connection_nodes(obj: Any) -> Iterator[dict]:
             yield from _iter_timeline_connection_nodes(item)
 
 
+def _belongs_to(node: dict, handle: str) -> bool:
+    """O nó é do perfil raspado? Aceita autor/owner igual ao handle ou coautoria
+    (posts collab aparecem na grade de ambos)."""
+    wanted = handle.lower()
+    for key in ("user", "owner"):
+        author = node.get(key)
+        if isinstance(author, dict) and (author.get("username") or "").lower() == wanted:
+            return True
+    for coauthor in node.get("coauthor_producers") or []:
+        if isinstance(coauthor, dict) and (coauthor.get("username") or "").lower() == wanted:
+            return True
+    return False
+
+
 def _iter_post_nodes_generic(obj: Any) -> Iterator[dict]:
     """Fallback tolerante: qualquer nó que "pareça" um post, usado só quando a
     conexão nomeada acima não é encontrada no payload."""
@@ -74,6 +99,7 @@ def _iter_post_nodes_generic(obj: Any) -> Iterator[dict]:
         has_id = "shortcode" in obj or "code" in obj
         has_media = (
             "display_url" in obj
+            or "display_uri" in obj
             or "image_versions2" in obj
             or "video_url" in obj
             or "video_versions" in obj
@@ -135,7 +161,7 @@ def _best_media_from_node(node: dict, index: int) -> MediaItem | None:
         # candidatas costumam vir ordenadas da maior para a menor resolução
         return MediaItem(kind=MediaKind.IMAGE, url=candidates[0]["url"], index=index)
 
-    display_url = node.get("display_url")
+    display_url = node.get("display_url") or node.get("display_uri")
     if display_url:
         return MediaItem(kind=MediaKind.IMAGE, url=display_url, index=index)
 
@@ -190,7 +216,7 @@ def extract_metrics(node: dict, caption: str | None) -> dict:
     clips = node.get("clips_metadata") if isinstance(node.get("clips_metadata"), dict) else {}
     music_info = (clips.get("music_info") or {}).get("music_asset_info") or {}
     original_sound = (clips.get("original_sound_info") or {})
-    media_type = node.get("media_type")
+    media_type = node.get("media_type") or _POLARIS_MEDIA_TYPE.get(node.get("__typename"))
     text = caption or ""
     return {
         "like_count": _first_int(node, "like_count"),
@@ -234,16 +260,32 @@ def parse_post_node(node: dict) -> Post | None:
     )
 
 
-def parse_posts_from_payload(payload: Any) -> list[Post]:
+def parse_posts_from_payload(payload: Any, handle: str | None = None) -> list[Post]:
     """Extrai todos os posts únicos (por shortcode/code) encontrados em um payload JSON.
 
     Tenta primeiro a extração precisa (conexão de timeline nomeada); só cai pro
     scan genérico se essa conexão não existir no payload — assim evitamos tanto
     capturar conteúdo pré-buscado indevido quanto perder posts se o Instagram
     trocar de shape de novo.
+
+    Com `handle`, os nós do scan genérico são filtrados pelo dono do perfil (ou
+    coautoria): o Instagram serve conteúdo pré-buscado de outros perfis pelo mesmo
+    endpoint e nada na resposta o distingue, só a página aberta.
     """
     precise_nodes = list(_iter_timeline_connection_nodes(payload))
-    nodes = precise_nodes if precise_nodes else list(_iter_post_nodes_generic(payload))
+    if precise_nodes:
+        nodes = precise_nodes
+    else:
+        nodes = list(_iter_post_nodes_generic(payload))
+        if handle:
+            kept = [n for n in nodes if _belongs_to(n, handle)]
+            if len(kept) != len(nodes):
+                logger.info(
+                    "Fallback genérico: %d nó(s) de outros perfis descartado(s) em @%s",
+                    len(nodes) - len(kept),
+                    handle,
+                )
+            nodes = kept
 
     posts: dict[str, Post] = {}
     for node in nodes:
