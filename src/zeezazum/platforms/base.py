@@ -1,4 +1,5 @@
 """Interface comum para scrapers de plataforma (Instagram é a primeira implementação)."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -9,8 +10,12 @@ from playwright.async_api import BrowserContext
 from zeezazum.models import Post
 
 
+class AuthenticationRequired(Exception):
+    """A sessão exige novo login ou verificação manual."""
+
+
 class ProfileUnavailable(Exception):
-    """Sessão expirada, perfil privado/inexistente, ou bloqueio detectado."""
+    """Perfil privado, inexistente ou indisponível."""
 
 
 class BaseScraper(ABC):

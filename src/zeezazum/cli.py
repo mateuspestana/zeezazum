@@ -1,4 +1,5 @@
 """CLI do Zeezazum."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,10 +15,29 @@ from zeezazum.input.url_parser import extract_instagram_accounts
 from zeezazum.models import SocialAccount
 from zeezazum.pipeline.orchestrator import run_media_sync, run_scrape
 
-app = typer.Typer(help="Zeezazum — raspador universalizável de redes sociais (Playwright)")
+
+def _execute(coroutine):
+    from zeezazum.platforms.base import AuthenticationRequired
+    from zeezazum.pipeline.orchestrator import PersistenceFailure
+
+    try:
+        return asyncio.run(coroutine)
+    except AuthenticationRequired as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=3) from exc
+    except PersistenceFailure as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
 
 
-def _accounts_from_table(df: pl.DataFrame, *, id_column: str, url_column: str) -> list[SocialAccount]:
+app = typer.Typer(
+    help="Zeezazum — raspador universalizável de redes sociais (Playwright)"
+)
+
+
+def _accounts_from_table(
+    df: pl.DataFrame, *, id_column: str, url_column: str
+) -> list[SocialAccount]:
     accounts: list[SocialAccount] = []
     for row_id, text in zip(df[id_column].cast(pl.Utf8), df[url_column]):
         accounts.extend(extract_instagram_accounts(str(row_id), text))
@@ -26,17 +46,27 @@ def _accounts_from_table(df: pl.DataFrame, *, id_column: str, url_column: str) -
 
 @app.command()
 def prepare(
-    input: Path = typer.Option(..., "--input", help="Tabela de origem (parquet/csv/xlsx)"),
-    column: str = typer.Option(..., "--column", help="Coluna de texto livre com as redes sociais"),
-    id_column: str = typer.Option(..., "--id-column", help="Coluna identificadora única de cada linha"),
-    platform: str = typer.Option("instagram", "--platform", help="Plataforma a extrair (só 'instagram' por ora)"),
+    input: Path = typer.Option(
+        ..., "--input", help="Tabela de origem (parquet/csv/xlsx)"
+    ),
+    column: str = typer.Option(
+        ..., "--column", help="Coluna de texto livre com as redes sociais"
+    ),
+    id_column: str = typer.Option(
+        ..., "--id-column", help="Coluna identificadora única de cada linha"
+    ),
+    platform: str = typer.Option(
+        "instagram", "--platform", help="Plataforma a extrair (só 'instagram' por ora)"
+    ),
     extra_columns: str = typer.Option(
         "",
         "--extra-columns",
         help="Colunas adicionais da tabela de origem a manter no output, separadas por vírgula "
         "(ex.: 'NM_URNA_CANDIDATO,SG_UF,SG_PARTIDO,DS_CARGO')",
     ),
-    output: Path = typer.Option(..., "--output", help="Onde salvar a tabela normalizada"),
+    output: Path = typer.Option(
+        ..., "--output", help="Onde salvar a tabela normalizada"
+    ),
 ) -> None:
     """Extrai, de uma coluna de texto livre, só as contas de uma plataforma (ex.: Instagram),
     deduplicadas por linha — gera uma tabela pequena e limpa para alimentar `scrape`.
@@ -52,17 +82,24 @@ def prepare(
         raise typer.BadParameter(f"Coluna(s) não encontrada(s) em {input}: {missing}")
 
     accounts = _accounts_from_table(df, id_column=id_column, url_column=column)
-    rows = [{"row_id": a.row_id, "handle": a.handle, "instagram_url": a.url} for a in accounts]
+    rows = [
+        {"row_id": a.row_id, "handle": a.handle, "instagram_url": a.url}
+        for a in accounts
+    ]
     schema = {"row_id": pl.Utf8, "handle": pl.Utf8, "instagram_url": pl.Utf8}
     result = pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
 
     if extra_cols:
-        lookup = df.select([id_column, *extra_cols]).with_columns(pl.col(id_column).cast(pl.Utf8))
+        lookup = df.select([id_column, *extra_cols]).with_columns(
+            pl.col(id_column).cast(pl.Utf8)
+        )
         result = result.join(lookup, left_on="row_id", right_on=id_column, how="left")
         result = result.select(["row_id", *extra_cols, "handle", "instagram_url"])
 
     write_table(result, output)
-    typer.echo(f"{result.height} contas de instagram extraídas de {df.height} linhas -> {output}")
+    typer.echo(
+        f"{result.height} contas de instagram extraídas de {df.height} linhas -> {output}"
+    )
 
 
 def _load_config_and_accounts(config: Path):
@@ -73,20 +110,30 @@ def _load_config_and_accounts(config: Path):
         filename=cfg.logging.file,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    logging.getLogger("httpx").setLevel(logging.WARNING)  # uma linha por arquivo baixado polui o log
+    logging.getLogger("httpx").setLevel(
+        logging.WARNING
+    )  # uma linha por arquivo baixado polui o log
 
     df = read_table(cfg.input.path)
-    missing = [c for c in (cfg.input.url_column, cfg.input.id_column) if c not in df.columns]
+    missing = [
+        c for c in (cfg.input.url_column, cfg.input.id_column) if c not in df.columns
+    ]
     if missing:
-        raise typer.BadParameter(f"Coluna(s) não encontrada(s) em {cfg.input.path}: {missing}")
+        raise typer.BadParameter(
+            f"Coluna(s) não encontrada(s) em {cfg.input.path}: {missing}"
+        )
 
-    accounts = _accounts_from_table(df, id_column=cfg.input.id_column, url_column=cfg.input.url_column)
+    accounts = _accounts_from_table(
+        df, id_column=cfg.input.id_column, url_column=cfg.input.url_column
+    )
     return cfg, accounts
 
 
 @app.command()
 def scrape(
-    config: Path = typer.Option(Path("config.yaml"), "--config", help="Caminho do config.yaml"),
+    config: Path = typer.Option(
+        Path("config.yaml"), "--config", help="Caminho do config.yaml"
+    ),
 ) -> None:
     """Roda a raspagem (posts + mídia) a partir do config.yaml. Seguro para rodar
     repetidamente (ex.: via cron): candidatos novos são raspados do zero, candidatos
@@ -98,15 +145,19 @@ def scrape(
         raise typer.Exit(code=0)
 
     typer.echo(f"Raspando {len(accounts)} perfis do Instagram...")
-    asyncio.run(run_scrape(cfg, accounts))
+    _execute(run_scrape(cfg, accounts))
     typer.echo("Concluído.")
 
 
 @app.command()
 def backfill(
-    config: Path = typer.Option(Path("config.yaml"), "--config", help="Caminho do config.yaml"),
+    config: Path = typer.Option(
+        Path("config.yaml"), "--config", help="Caminho do config.yaml"
+    ),
     extra_posts: int = typer.Option(
-        ..., "--extra-posts", help="Quantos posts a mais buscar, além do que já foi salvo, por conta."
+        ...,
+        "--extra-posts",
+        help="Quantos posts a mais buscar, além do que já foi salvo, por conta.",
     ),
 ) -> None:
     """Aprofunda o histórico de contas já raspadas antes, buscando posts mais antigos
@@ -122,19 +173,23 @@ def backfill(
         typer.echo("Nenhuma conta de Instagram encontrada no input. Nada a fazer.")
         raise typer.Exit(code=0)
 
-    typer.echo(f"Aprofundando histórico de {len(accounts)} perfis do Instagram (+{extra_posts} posts cada)...")
-    asyncio.run(run_scrape(cfg, accounts, extra_posts=extra_posts))
+    typer.echo(
+        f"Aprofundando histórico de {len(accounts)} perfis do Instagram (+{extra_posts} posts cada)..."
+    )
+    _execute(run_scrape(cfg, accounts, extra_posts=extra_posts))
     typer.echo("Concluído.")
 
 
 @app.command("media-sync")
 def media_sync(
-    config: Path = typer.Option(Path("config.yaml"), "--config", help="Caminho do config.yaml"),
+    config: Path = typer.Option(
+        Path("config.yaml"), "--config", help="Caminho do config.yaml"
+    ),
 ) -> None:
     """Baixa a mídia que falta em disco para posts já raspados (recupera downloads
     interrompidos). Não abre navegador e não raspa nada novo."""
     cfg, accounts = _load_config_and_accounts(config)
-    result = asyncio.run(run_media_sync(cfg, accounts))
+    result = _execute(run_media_sync(cfg, accounts))
     for handle, n in result.items():
         typer.echo(f"@{handle}: {n} arquivos reenfileirados")
     typer.echo("Concluído.")

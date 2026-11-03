@@ -5,6 +5,33 @@ Todas as mudanças notáveis deste projeto são documentadas aqui.
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e o versionamento segue [SemVer](https://semver.org/lang/pt-BR/).
 
+## [0.2.3] — 2026-11-03
+
+Esta versão sucede diretamente a 0.2.1; não houve release 0.2.2.
+
+### Corrigido
+- Estado independente por identificador, plataforma e handle, com migração
+  transacional e backup do banco antigo.
+- Downloads persistidos no DuckDB e retomados automaticamente; falhas de rede ou
+  gravação não são tratadas como sucesso. Contagem de pendências reconciliada.
+- URLs de mídia reencontradas são atualizadas sem substituir métricas históricas.
+- Checkpoints parciais não avançam o marcador incremental antes do fim do perfil.
+- Sessão expirada/verificação obrigatória interrompe novos perfis e retorna código 3.
+- Arquivos de posts ilegíveis não são sobrescritos silenciosamente.
+
+### Adicionado
+- Workers e fila de download limitados; resumo de resultados e código 1 para
+  downloads que permanecem com falha.
+- Checkpoints consistentes do estado no S3, configuráveis por
+  `storage.s3.state_sync_interval_seconds` (padrão: 60 segundos).
+- Preservação do estado temporário quando o upload final falha.
+- Testes automatizados de recuperação, migração e autenticação.
+
+### Documentação
+- README reorganizado com início rápido, comandos, referência de configuração,
+  operação no servidor, códigos de saída, migração e procedimentos de recuperação.
+- Limites da coleta incremental, URLs expiradas e execução única por destino.
+
 ## [0.2.1] — 2026-10-16
 
 ### Adicionado

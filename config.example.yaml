@@ -25,6 +25,7 @@ storage:
     bucket: null
     prefix: zeezazum/
     region: us-east-1
+    state_sync_interval_seconds: 60  # checkpoint do DuckDB no S3; inteiro > 0
 
 media:
   download_images: true

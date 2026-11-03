@@ -1,4 +1,5 @@
 """Carregamento e validação do config.yaml."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -37,6 +38,7 @@ class S3StorageConfig(BaseModel):
     bucket: str | None = None
     prefix: str = "zeezazum/"
     region: str = "us-east-1"
+    state_sync_interval_seconds: int = Field(default=60, gt=0)
 
 
 class StorageConfig(BaseModel):
@@ -48,7 +50,7 @@ class StorageConfig(BaseModel):
 class MediaConfig(BaseModel):
     download_images: bool = True
     download_videos: bool = True
-    max_concurrent_downloads: int = 4
+    max_concurrent_downloads: int = Field(default=4, gt=0)
 
 
 class LoggingConfig(BaseModel):

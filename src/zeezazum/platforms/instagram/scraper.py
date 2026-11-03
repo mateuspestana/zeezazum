@@ -2,6 +2,7 @@
 de rede (mesma filosofia do Zeeschuimer — captura o que a própria página carrega,
 não faz scraping de DOM nem chama API "por fora" do browser autenticado).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -13,17 +14,38 @@ from datetime import datetime, timezone
 from playwright.async_api import BrowserContext, Response
 
 from zeezazum.models import Post
-from zeezazum.platforms.base import BaseScraper, ProfileUnavailable
+from zeezazum.platforms.base import (
+    AuthenticationRequired,
+    BaseScraper,
+    ProfileUnavailable,
+)
 from zeezazum.platforms.instagram.parser import parse_posts_from_payload
 
 logger = logging.getLogger(__name__)
 
 _API_URL_HINTS = ("graphql", "/api/v1/")
-_LOGIN_URL_HINT = "/accounts/login"
-_MAX_STAGNANT_SCROLLS = 8        # perfis longos: o Instagram às vezes demora a devolver a próxima página
-_CONSECUTIVE_OLD_TO_STOP = 12    # posts não fixados mais antigos que since_date para encerrar o scroll
-_CHECKPOINT_EVERY = 200          # posts novos capturados entre checkpoints (persistência parcial)
-_LONG_PAUSE_EVERY = 40           # scrolls entre pausas longas (reduz risco de bloqueio em scroll profundo)
+_AUTH_PATHS = ("/accounts/login", "/challenge/", "/checkpoint/", "/accounts/suspended")
+
+
+def requires_auth(url: str) -> bool:
+    from urllib.parse import urlparse
+
+    path = urlparse(url).path
+    return any(hint in path for hint in _AUTH_PATHS)
+
+
+_MAX_STAGNANT_SCROLLS = (
+    8  # perfis longos: o Instagram às vezes demora a devolver a próxima página
+)
+_CONSECUTIVE_OLD_TO_STOP = (
+    12  # posts não fixados mais antigos que since_date para encerrar o scroll
+)
+_CHECKPOINT_EVERY = (
+    200  # posts novos capturados entre checkpoints (persistência parcial)
+)
+_LONG_PAUSE_EVERY = (
+    40  # scrolls entre pausas longas (reduz risco de bloqueio em scroll profundo)
+)
 _LONG_PAUSE_RANGE = (8.0, 20.0)
 _OG_STATS_RE = re.compile(
     r"([\d.,]+)\s*([KkMm])?\s+Followers?,\s*([\d.,]+)\s*([KkMm])?\s+Following,\s*([\d.,]+)\s*([KkMm])?\s+Posts?",
@@ -60,7 +82,7 @@ class InstagramScraper(BaseScraper):
         async def on_response(response: Response) -> None:
             nonlocal login_redirect_detected
             url = response.url
-            if _LOGIN_URL_HINT in url:
+            if requires_auth(url) and response.request.is_navigation_request():
                 login_redirect_detected = True
                 return
             if not any(hint in url for hint in _API_URL_HINTS):
@@ -76,56 +98,90 @@ class InstagramScraper(BaseScraper):
             for post in parse_posts_from_payload(payload):
                 captured.setdefault(post.shortcode, post)
 
-        page.on("response", on_response)
-
         try:
-            await page.goto(f"https://www.instagram.com/{handle}/", wait_until="domcontentloaded")
-            await asyncio.sleep(2)  # dá tempo das primeiras chamadas XHR/GraphQL chegarem
-        except Exception as exc:
-            await page.close()
-            raise ProfileUnavailable(f"Falha ao abrir perfil @{handle}: {exc}") from exc
+            page.on("response", on_response)
 
-        if login_redirect_detected or "/accounts/login" in page.url:
-            await page.close()
-            raise ProfileUnavailable(
-                f"Sessão inválida/expirada ao acessar @{handle} — refaça o login local "
-                "(scripts/local_login.py) e copie o storage_state atualizado para o servidor."
+            try:
+                await page.goto(
+                    f"https://www.instagram.com/{handle}/",
+                    wait_until="domcontentloaded",
+                )
+                await asyncio.sleep(
+                    2
+                )  # dá tempo das primeiras chamadas XHR/GraphQL chegarem
+            except Exception as exc:
+                if login_redirect_detected or requires_auth(page.url):
+                    raise AuthenticationRequired(
+                        "Sessão inválida; refaça scripts/local_login.py e copie a sessão."
+                    ) from exc
+                raise ProfileUnavailable(
+                    f"Falha ao abrir perfil @{handle}: {exc}"
+                ) from exc
+
+            if login_redirect_detected or requires_auth(page.url):
+                raise AuthenticationRequired(
+                    f"Sessão inválida/expirada ao acessar @{handle} — refaça o login local "
+                    "(scripts/local_login.py) e copie o storage_state atualizado para o servidor."
+                )
+
+            self.last_profile_stats = await self._read_profile_stats(page)
+
+            stagnant_rounds = 0
+            previous_count = 0
+            last_checkpoint = 0
+            scrolls = 0
+
+            while not self._should_stop(
+                captured, max_posts, since_date, stop_at_post_id
+            ):
+                # o mouse precisa estar sobre o conteúdo: em (0,0) o wheel cai na barra lateral
+                # fixa do Instagram e a grade não rola (bug visto no piloto: só 3 posts por perfil).
+                await page.mouse.move(
+                    random.uniform(500, 800), random.uniform(350, 550)
+                )
+                await page.mouse.wheel(0, 3000)
+                await asyncio.sleep(random.uniform(*self._scroll_delay_range))
+                if login_redirect_detected or requires_auth(page.url):
+                    raise AuthenticationRequired(
+                        "Sessão expirada ou verificação obrigatória; refaça scripts/local_login.py e copie a sessão para o servidor."
+                    )
+                scrolls += 1
+                if scrolls % _LONG_PAUSE_EVERY == 0:
+                    await asyncio.sleep(random.uniform(*_LONG_PAUSE_RANGE))
+
+                if (
+                    on_checkpoint is not None
+                    and len(captured) - last_checkpoint >= _CHECKPOINT_EVERY
+                ):
+                    last_checkpoint = len(captured)
+                    snapshot = sorted(
+                        captured.values(),
+                        key=lambda p: p.timestamp or _MIN_DT,
+                        reverse=True,
+                    )
+                    await on_checkpoint(
+                        self._apply_final_filters(
+                            snapshot, max_posts, since_date, stop_at_post_id
+                        )
+                    )
+
+                if len(captured) == previous_count:
+                    stagnant_rounds += 1
+                    if stagnant_rounds >= _MAX_STAGNANT_SCROLLS:
+                        break
+                else:
+                    stagnant_rounds = 0
+                previous_count = len(captured)
+
+            posts = sorted(
+                captured.values(), key=lambda p: p.timestamp or _MIN_DT, reverse=True
+            )
+            return self._apply_final_filters(
+                posts, max_posts, since_date, stop_at_post_id
             )
 
-        self.last_profile_stats = await self._read_profile_stats(page)
-
-        stagnant_rounds = 0
-        previous_count = 0
-        last_checkpoint = 0
-        scrolls = 0
-
-        while not self._should_stop(captured, max_posts, since_date, stop_at_post_id):
-            # o mouse precisa estar sobre o conteúdo: em (0,0) o wheel cai na barra lateral
-            # fixa do Instagram e a grade não rola (bug visto no piloto: só 3 posts por perfil).
-            await page.mouse.move(random.uniform(500, 800), random.uniform(350, 550))
-            await page.mouse.wheel(0, 3000)
-            await asyncio.sleep(random.uniform(*self._scroll_delay_range))
-            scrolls += 1
-            if scrolls % _LONG_PAUSE_EVERY == 0:
-                await asyncio.sleep(random.uniform(*_LONG_PAUSE_RANGE))
-
-            if on_checkpoint is not None and len(captured) - last_checkpoint >= _CHECKPOINT_EVERY:
-                last_checkpoint = len(captured)
-                snapshot = sorted(captured.values(), key=lambda p: p.timestamp or _MIN_DT, reverse=True)
-                await on_checkpoint(self._apply_final_filters(snapshot, max_posts, since_date, stop_at_post_id))
-
-            if len(captured) == previous_count:
-                stagnant_rounds += 1
-                if stagnant_rounds >= _MAX_STAGNANT_SCROLLS:
-                    break
-            else:
-                stagnant_rounds = 0
-            previous_count = len(captured)
-
-        await page.close()
-
-        posts = sorted(captured.values(), key=lambda p: p.timestamp or _MIN_DT, reverse=True)
-        return self._apply_final_filters(posts, max_posts, since_date, stop_at_post_id)
+        finally:
+            await page.close()
 
     @staticmethod
     def _should_stop(
@@ -141,7 +197,11 @@ class InstagramScraper(BaseScraper):
         if since_date is not None:
             # posts fixados no topo da grade podem ser bem antigos e não indicam que o
             # scroll passou do corte — só contam posts não fixados.
-            old = sum(1 for p in captured.values() if not p.is_pinned and p.timestamp and p.timestamp < since_date)
+            old = sum(
+                1
+                for p in captured.values()
+                if not p.is_pinned and p.timestamp and p.timestamp < since_date
+            )
             if old >= _CONSECUTIVE_OLD_TO_STOP:
                 return True
         return False
@@ -150,7 +210,9 @@ class InstagramScraper(BaseScraper):
     async def _read_profile_stats(page) -> dict | None:
         """Lê seguidores/seguindo/total de posts da meta og:description da página do perfil."""
         try:
-            content = await page.locator('meta[property="og:description"]').first.get_attribute("content", timeout=5000)
+            content = await page.locator(
+                'meta[property="og:description"]'
+            ).first.get_attribute("content", timeout=5000)
         except Exception:
             return None
         m = _OG_STATS_RE.search(content or "")
@@ -165,7 +227,9 @@ class InstagramScraper(BaseScraper):
             "followers": num(m.group(1), m.group(2)),
             "following": num(m.group(3), m.group(4)),
             "posts_total": num(m.group(5), m.group(6)),
-            "followers_rounded": bool(m.group(2)),  # "5M" etc.: contagem arredondada pelo Instagram
+            "followers_rounded": bool(
+                m.group(2)
+            ),  # "5M" etc.: contagem arredondada pelo Instagram
             "collected_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -180,7 +244,11 @@ class InstagramScraper(BaseScraper):
         for post in posts:
             if stop_at_post_id is not None and post.shortcode == stop_at_post_id:
                 break
-            if since_date is not None and post.timestamp and post.timestamp < since_date:
+            if (
+                since_date is not None
+                and post.timestamp
+                and post.timestamp < since_date
+            ):
                 break
             result.append(post)
             if max_posts is not None and len(result) >= max_posts:
