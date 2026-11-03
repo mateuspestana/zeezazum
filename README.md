@@ -1,5 +1,10 @@
 # Zeezazum
 
+[![DOI](https://zenodo.org/badge/1385550085.svg)](https://doi.org/10.5281/zenodo.23932959)
+[![versão](https://img.shields.io/github/v/release/mateuspestana/zeezazum?label=versão)](https://github.com/mateuspestana/zeezazum/releases)
+[![licença](https://img.shields.io/github/license/mateuspestana/zeezazum?label=licença)](LICENSE)
+[![atualizado](https://img.shields.io/github/last-commit/mateuspestana/zeezazum?label=atualizado)](https://github.com/mateuspestana/zeezazum/commits/main)
+
 Coleta posts, imagens e vídeos do Instagram a partir de tabelas de contas.
 Usa Playwright para capturar respostas de rede enquanto navega pelo perfil,
 inspirado no [Zeeschuimer](https://github.com/digitalmethodsinitiative/zeeschuimer).
