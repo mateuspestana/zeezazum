@@ -120,7 +120,7 @@ class StateStore:
             _UPSERT_SQL,
             [
                 state.candidate_id,
-                "instagram",
+                state.platform,
                 state.handle.lower(),
                 state.status,
                 state.newest_post_id,
@@ -131,12 +131,15 @@ class StateStore:
             ],
         )
 
-    def register_media(self, handle, shortcode, item, *, exists=False):
+    def register_media(
+        self, handle, shortcode, item, *, exists=False, platform="instagram"
+    ):
         self._con.execute(
-            """INSERT INTO media_tasks VALUES ('instagram', ?, ?, ?, ?, ?, ?, NULL)
+            """INSERT INTO media_tasks VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
             ON CONFLICT(platform, handle, shortcode, item_index) DO UPDATE SET
             url=excluded.url, kind=excluded.kind, status=excluded.status, error=NULL""",
             [
+                platform,
                 handle.lower(),
                 shortcode,
                 item.index,
@@ -146,26 +149,35 @@ class StateStore:
             ],
         )
 
-    def finish_media(self, handle, shortcode, index, error=None):
+    def finish_media(
+        self, handle, shortcode, index, error=None, platform="instagram"
+    ):
         self._con.execute(
-            "UPDATE media_tasks SET status=?, error=? WHERE platform='instagram' AND handle=? AND shortcode=? AND item_index=?",
-            ["failed" if error else "done", error, handle.lower(), shortcode, index],
+            "UPDATE media_tasks SET status=?, error=? WHERE platform=? AND handle=? AND shortcode=? AND item_index=?",
+            [
+                "failed" if error else "done",
+                error,
+                platform,
+                handle.lower(),
+                shortcode,
+                index,
+            ],
         )
 
-    def pending_media(self, handle, images=True, videos=True):
+    def pending_media(self, handle, images=True, videos=True, platform="instagram"):
         kinds = [k for k, enabled in [("image", images), ("video", videos)] if enabled]
         return self._con.execute(
-            "SELECT shortcode, item_index, kind, url FROM media_tasks WHERE platform='instagram' AND handle=? AND status!='done' AND kind IN (SELECT unnest(?))",
-            [handle.lower(), kinds],
+            "SELECT shortcode, item_index, kind, url FROM media_tasks WHERE platform=? AND handle=? AND status!='done' AND kind IN (SELECT unnest(?))",
+            [platform, handle.lower(), kinds],
         ).fetchall()
 
     def refresh_pending(self, images=True, videos=True):
-        for (handle,) in self._con.execute(
-            "SELECT DISTINCT handle FROM candidate_state"
+        for platform, handle in self._con.execute(
+            "SELECT DISTINCT platform, handle FROM candidate_state"
         ).fetchall():
             self._con.execute(
-                "UPDATE candidate_state SET media_pending=? WHERE handle=? AND platform='instagram'",
-                [len(self.pending_media(handle, images, videos)), handle],
+                "UPDATE candidate_state SET media_pending=? WHERE handle=? AND platform=?",
+                [len(self.pending_media(handle, images, videos, platform)), handle, platform],
             )
 
     def snapshot(self):

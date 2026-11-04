@@ -11,8 +11,9 @@ import typer
 
 from zeezazum.config import load_config
 from zeezazum.input.loader import read_table, write_table
-from zeezazum.input.url_parser import extract_instagram_accounts
+from zeezazum.input.url_parser import extract_accounts
 from zeezazum.models import SocialAccount
+from zeezazum.platforms import DISPLAY_NAMES, PLATFORMS
 from zeezazum.pipeline.orchestrator import run_media_sync, run_scrape
 
 
@@ -36,11 +37,11 @@ app = typer.Typer(
 
 
 def _accounts_from_table(
-    df: pl.DataFrame, *, id_column: str, url_column: str
+    df: pl.DataFrame, *, id_column: str, url_column: str, platform: str = "instagram"
 ) -> list[SocialAccount]:
     accounts: list[SocialAccount] = []
     for row_id, text in zip(df[id_column].cast(pl.Utf8), df[url_column]):
-        accounts.extend(extract_instagram_accounts(str(row_id), text))
+        accounts.extend(extract_accounts(platform, str(row_id), text))
     return accounts
 
 
@@ -56,7 +57,7 @@ def prepare(
         ..., "--id-column", help="Coluna identificadora única de cada linha"
     ),
     platform: str = typer.Option(
-        "instagram", "--platform", help="Plataforma a extrair (só 'instagram' por ora)"
+        "instagram", "--platform", help="Plataforma a extrair: instagram ou tiktok"
     ),
     extra_columns: str = typer.Option(
         "",
@@ -68,12 +69,12 @@ def prepare(
         ..., "--output", help="Onde salvar a tabela normalizada"
     ),
 ) -> None:
-    """Extrai, de uma coluna de texto livre, só as contas de uma plataforma (ex.: Instagram),
+    """Extrai, de uma coluna de texto livre, só as contas de uma plataforma (Instagram ou TikTok),
     deduplicadas por linha — gera uma tabela pequena e limpa para alimentar `scrape`.
     Opcionalmente carrega junto outras colunas de identificação da tabela de origem
     (nome, UF, partido etc.), úteis pra conferir/filtrar antes de raspar."""
-    if platform != "instagram":
-        raise typer.BadParameter("Por enquanto só 'instagram' é suportado.")
+    if platform not in PLATFORMS:
+        raise typer.BadParameter(f"Plataforma não suportada. Use uma de: {', '.join(PLATFORMS)}.")
 
     df = read_table(input)
     extra_cols = [c.strip() for c in extra_columns.split(",") if c.strip()]
@@ -81,12 +82,14 @@ def prepare(
     if missing:
         raise typer.BadParameter(f"Coluna(s) não encontrada(s) em {input}: {missing}")
 
-    accounts = _accounts_from_table(df, id_column=id_column, url_column=column)
+    accounts = _accounts_from_table(
+        df, id_column=id_column, url_column=column, platform=platform
+    )
+    url_col = f"{platform}_url"
     rows = [
-        {"row_id": a.row_id, "handle": a.handle, "instagram_url": a.url}
-        for a in accounts
+        {"row_id": a.row_id, "handle": a.handle, url_col: a.url} for a in accounts
     ]
-    schema = {"row_id": pl.Utf8, "handle": pl.Utf8, "instagram_url": pl.Utf8}
+    schema = {"row_id": pl.Utf8, "handle": pl.Utf8, url_col: pl.Utf8}
     result = pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
 
     if extra_cols:
@@ -94,11 +97,11 @@ def prepare(
             pl.col(id_column).cast(pl.Utf8)
         )
         result = result.join(lookup, left_on="row_id", right_on=id_column, how="left")
-        result = result.select(["row_id", *extra_cols, "handle", "instagram_url"])
+        result = result.select(["row_id", *extra_cols, "handle", url_col])
 
     write_table(result, output)
     typer.echo(
-        f"{result.height} contas de instagram extraídas de {df.height} linhas -> {output}"
+        f"{result.height} contas de {platform} extraídas de {df.height} linhas -> {output}"
     )
 
 
@@ -124,7 +127,10 @@ def _load_config_and_accounts(config: Path):
         )
 
     accounts = _accounts_from_table(
-        df, id_column=cfg.input.id_column, url_column=cfg.input.url_column
+        df,
+        id_column=cfg.input.id_column,
+        url_column=cfg.input.url_column,
+        platform=cfg.platform,
     )
     return cfg, accounts
 
@@ -141,10 +147,12 @@ def scrape(
     reencontra o post mais recente já conhecido)."""
     cfg, accounts = _load_config_and_accounts(config)
     if not accounts:
-        typer.echo("Nenhuma conta de Instagram encontrada no input. Nada a fazer.")
+        typer.echo(
+            f"Nenhuma conta de {DISPLAY_NAMES[cfg.platform]} encontrada no input. Nada a fazer."
+        )
         raise typer.Exit(code=0)
 
-    typer.echo(f"Raspando {len(accounts)} perfis do Instagram...")
+    typer.echo(f"Raspando {len(accounts)} perfis do {DISPLAY_NAMES[cfg.platform]}...")
     _execute(run_scrape(cfg, accounts))
     typer.echo("Concluído.")
 
@@ -163,7 +171,7 @@ def backfill(
         False,
         "--all",
         help="Baixa o histórico completo: ignora max_posts e since_date e só para "
-        "quando o Instagram deixa de entregar posts.",
+        "quando a plataforma deixa de entregar posts.",
     ),
 ) -> None:
     """Aprofunda o histórico de contas já raspadas antes, buscando posts mais antigos
@@ -178,11 +186,15 @@ def backfill(
 
     cfg, accounts = _load_config_and_accounts(config)
     if not accounts:
-        typer.echo("Nenhuma conta de Instagram encontrada no input. Nada a fazer.")
+        typer.echo(
+            f"Nenhuma conta de {DISPLAY_NAMES[cfg.platform]} encontrada no input. Nada a fazer."
+        )
         raise typer.Exit(code=0)
 
     alvo = "histórico completo" if all_posts else f"+{extra_posts} posts cada"
-    typer.echo(f"Aprofundando histórico de {len(accounts)} perfis do Instagram ({alvo})...")
+    typer.echo(
+        f"Aprofundando histórico de {len(accounts)} perfis do {DISPLAY_NAMES[cfg.platform]} ({alvo})..."
+    )
     _execute(run_scrape(cfg, accounts, extra_posts=extra_posts, fetch_all=all_posts))
     typer.echo("Concluído.")
 

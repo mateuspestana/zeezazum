@@ -5,13 +5,15 @@
 [![licença](https://img.shields.io/github/license/mateuspestana/zeezazum?label=licença)](LICENSE)
 [![atualizado](https://img.shields.io/github/last-commit/mateuspestana/zeezazum?label=atualizado)](https://github.com/mateuspestana/zeezazum/commits/main)
 
-Coleta posts, imagens e vídeos do Instagram a partir de tabelas de contas.
-Usa Playwright para capturar respostas de rede enquanto navega pelo perfil,
-inspirado no [Zeeschuimer](https://github.com/digitalmethodsinitiative/zeeschuimer).
+Coleta posts, imagens e vídeos do Instagram e do TikTok a partir de tabelas de
+contas. No Instagram, usa Playwright para capturar as respostas de rede enquanto
+navega pelo perfil, inspirado no
+[Zeeschuimer](https://github.com/digitalmethodsinitiative/zeeschuimer). O TikTok
+funciona sem login e usa o yt-dlp (veja [TikTok](#tiktok)).
 Não depende de um dataset específico: qualquer tabela com identificador e texto
 contendo URLs ou handles pode alimentar a coleta.
 
-**Versão: 0.2.5** · [Histórico de mudanças](CHANGELOG.md)
+**Versão: 0.3.0** · [Histórico de mudanças](CHANGELOG.md)
 
 **Autor:** Matheus C. Pestana ([matheus.pestana@iesp.uerj.br](mailto:matheus.pestana@iesp.uerj.br)).
 
@@ -58,6 +60,70 @@ uv run zeezazum scrape --config config.yaml
 ```
 
 Confira os arquivos de saída e `logs/zeezazum.log` antes de ampliar o lote.
+
+## TikTok
+
+O TikTok não pede login. Prepare a tabela com `--platform tiktok` e aponte o
+`config.yaml` para ela com `platform: tiktok`:
+
+```bash
+uv run zeezazum prepare \
+  --input data/candidatos_atual.parquet \
+  --column "REDES SOCIAIS" --id-column SQ_CANDIDATO \
+  --platform tiktok --output data/candidatos_tiktok.parquet
+uv run zeezazum scrape --config config.yaml
+```
+
+O resultado traz `row_id`, `handle` e `tiktok_url`. O parser reconhece
+`tiktok.com/@handle`, links de vídeo e rótulos como "TikTok: @handle". Links curtos
+(`vm.tiktok.com/...`) só se resolvem com uma requisição, então são ignorados e o log
+avisa quais foram. Cada execução cuida de uma plataforma. Para coletar as duas, use
+dois `config.yaml`; o estado e as pastas de saída ficam separados por plataforma.
+
+Por baixo, o navegador anônimo recebe uma lista de vídeos vazia do TikTok, e por isso
+a listagem e o download dos vídeos são feitos pelo yt-dlp. Testamos o Playwright com
+stealth (`playwright-stealth`), no Chromium embutido e no Chrome real, com e sem
+janela: o TikTok mostra um captcha de deslizar o quebra-cabeça e a lista continua
+vazia. Não automatizamos a resolução do captcha. O navegador entra só para
+ler os dados do perfil: se ele existe, se é privado e quantos vídeos declara ter.
+Perfil inexistente vira erro na hora, sem gastar tentativas (testado: o TikTok
+devolve `statusCode 10221`). O perfil privado deveria ter o mesmo tratamento, mas não
+foi testado contra uma conta privada real. O total declarado de vídeos alimenta o
+aviso de cobertura do `backfill --all`.
+
+O que esperar dessa via:
+
+- **É intermitente.** Nos testes de novembro de 2026, só cerca de 40% das aberturas
+  de perfil deram certo de primeira, e o TikTok respondeu 429 algumas vezes. O
+  Zeezazum repete com espera crescente (até 10 tentativas por passada) e, se a
+  paginação falha no meio, recomeça pulando o que já viu. Uma lista incompleta nunca
+  é entregue como se fosse completa: se as tentativas acabam, o perfil fica com
+  status de erro e a próxima execução tenta de novo.
+- **O tempo varia muito.** Com a abertura do perfil dando certo de primeira, três
+  posts com vídeo saíram em 14 segundos; numa rodada anterior, a mesma coleta levou
+  quase quatro minutos até o TikTok deixar passar. Para uma lista grande de contas,
+  comece com um piloto de umas cinco e meça antes de soltar o lote.
+- **A contagem pode não bater.** Num perfil com 1516 vídeos declarados, a listagem
+  completa trouxe 1479. Pode ser conteúdo que o TikTok não lista publicamente; não
+  há como distinguir de perda, então trate o `profile.json` como referência, não
+  como garantia.
+- **Vídeos.** O arquivo salvo é o de maior qualidade, que costuma ser HEVC. Se
+  precisar de H.264 (mais compatível com navegadores), use
+  `media.tiktok_video_format: "best[vcodec^=h264]/best"`.
+- **Capas.** São baixadas junto, mas a URL expira em cerca de dois dias; depois
+  disso, o `media-sync` não recupera a capa de posts antigos.
+- **Posts de fotos (slideshows)** guardam só a capa: o yt-dlp não baixa o carrossel.
+  A identificação desses posts vem da leitura do código do yt-dlp e não foi
+  verificada contra um slideshow real.
+- **Sem fixados.** A listagem não diz quais posts estão fixados, então o corte por
+  `since_date` considera todos. Fixados antigos no topo não atrapalham o marcador
+  incremental, porque os posts são ordenados por data antes de gravar.
+- As métricas do TikTok são `like_count`, `comment_count`, `view_count`,
+  `share_count`, `save_count`, `video_duration`, `hashtags`, `mentions`,
+  `audio_title`, `audio_artist`, `owner_username` e `owner_id`.
+
+O yt-dlp acompanha as mudanças do TikTok. Se as coletas começarem a falhar de
+repente, o primeiro passo é `uv lock --upgrade-package yt-dlp`.
 
 ## Qual comando usar
 
@@ -117,7 +183,8 @@ entram na contagem de pendências daquela execução.
 | `scraping.max_posts` | `60` | Limite por perfil; `null` remove esse limite |
 | `scraping.since_date` | `null` | Corte de data, por exemplo `"2024-01-01"` |
 | `scraping.headless` | `true` | Navegador sem janela |
-| `scraping.session_file` | `sessions/instagram_storage_state.json` | Sessão criada localmente |
+| `platform` | `instagram` | `instagram` ou `tiktok`; uma plataforma por execução |
+| `scraping.session_file` | `sessions/instagram_storage_state.json` | Sessão criada localmente (só Instagram) |
 | `scraping.delay_between_profiles_seconds` | `[4, 10]` | Espera aleatória entre perfis |
 | `scraping.retry.max_attempts` | `3` | Tentativas para erros gerais de extração |
 | `scraping.retry.backoff_seconds` | `30` | Espera entre essas tentativas |
@@ -129,6 +196,7 @@ entram na contagem de pendências daquela execução.
 | `storage.s3.state_sync_interval_seconds` | `60` | Intervalo positivo entre checkpoints do estado no S3 |
 | `media.download_images` / `download_videos` | `true` | Tipos de mídia habilitados |
 | `media.max_concurrent_downloads` | `4` | Número positivo de workers de download |
+| `media.tiktok_video_format` | `best` | Formato do yt-dlp para vídeos do TikTok |
 | `logging.level` / `file` | `INFO` / `logs/zeezazum.log` | Registro detalhado da execução |
 
 Perfis são visitados sequencialmente usando uma sessão. Apenas downloads de mídia
@@ -140,7 +208,7 @@ espera exponencial e timeout HTTP de 60 segundos.
 ```text
 output/
 ├── _state.duckdb
-└── instagram/<handle>/
+└── instagram/<handle>/        (ou tiktok/<handle>/)
     ├── posts.json
     ├── posts.parquet
     ├── profile.json

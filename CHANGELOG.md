@@ -5,6 +5,41 @@ Todas as mudanças notáveis deste projeto são documentadas aqui.
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e o versionamento segue [SemVer](https://semver.org/lang/pt-BR/).
 
+## [0.3.0] — 2026-11-04
+
+O Zeezazum passa a coletar também o TikTok, sem login.
+
+### Adicionado
+- `platform: tiktok` no `config.yaml` e `prepare --platform tiktok` (gera `tiktok_url`).
+  Reconhece `tiktok.com/@handle`, links de vídeo e rótulos "TikTok: @handle"; links
+  curtos são ignorados com aviso no log.
+- Coleta pelo yt-dlp, porque o navegador anônimo recebe a lista de vídeos vazia do
+  TikTok. O navegador só lê os dados do perfil: classifica perfil inexistente ou
+  privado sem gastar tentativas e fornece o total de vídeos para o aviso de cobertura
+  do `backfill --all`.
+- Vídeo (maior qualidade, configurável em `media.tiktok_video_format`) e capa de
+  cada post. Posts de fotos guardam só a capa.
+- Métricas do TikTok: curtidas, comentários, visualizações, compartilhamentos,
+  salvamentos, duração, hashtags, menções, trilha e autor.
+- Retry com espera crescente na abertura do perfil (o TikTok é intermitente) e
+  retomada da listagem sem duplicar posts quando a paginação falha no meio. Lista
+  incompleta nunca é devolvida como completa.
+- Dependência `yt-dlp` (>= 2026.10.26) e testes sem rede para o TikTok, com fixture
+  de entradas reais; teste ao vivo opcional com `ZEEZAZUM_LIVE=1`.
+
+### Alterado
+- O estado e as tarefas de mídia passam a ser separados por plataforma em todas as
+  operações; o mesmo @ no Instagram e no TikTok não se mistura. Os dados do
+  Instagram não mudam de lugar.
+- O downloader saiu de `platforms/instagram/` para `platforms/downloader.py`.
+- O `.gitignore` agora cobre `.venv` como symlink e `.venv.nosync`.
+
+### Limitações conhecidas
+- Em um perfil com 1516 vídeos declarados, a listagem completa trouxe 1479.
+- Perfil privado não foi testado contra uma conta privada real.
+- A detecção de slideshows se baseia no código do yt-dlp, sem verificação ao vivo.
+- Se o TikTok mudar a API, o yt-dlp precisa ser atualizado.
+
 ## [0.2.5] — 2026-11-04
 
 ### Adicionado

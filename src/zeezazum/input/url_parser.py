@@ -1,4 +1,4 @@
-"""Extrai contas do Instagram de uma coluna de texto livre com redes sociais.
+"""Extrai contas do Instagram e do TikTok de uma coluna de texto livre com redes sociais.
 
 O texto de origem é sujo por natureza: várias URLs separadas por `;`, prefixos
 como "Link Instagram:", maiúsculas/minúsculas variadas, às vezes sem protocolo
@@ -8,9 +8,12 @@ formato foi confirmado direto na amostra real do `candidatos_atual.parquet`.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from zeezazum.models import SocialAccount
+
+logger = logging.getLogger(__name__)
 
 _SPLIT_RE = re.compile(r"[;\n]+")
 # inclui "-" e "@" no meio do path: "-" aparece em handles digitados errado mas
@@ -70,3 +73,71 @@ def extract_instagram_accounts(row_id: str, text: str | None) -> list[SocialAcco
             )
 
     return list(found.values())
+
+
+# TikTok: handles têm letras, dígitos, "_" e "." (nunca terminam em ".").
+_TT_URL_HANDLE_RE = re.compile(r"tiktok\.com/@([A-Za-z0-9_.]+)", re.IGNORECASE)
+# o separador (":", espaço ou "@") é obrigatório: "ttfulano" não é o @fulano
+_TT_LABEL_RE = re.compile(
+    r"^(?:link\s+)?(?:tik\s*tok|tt)(?:\s*:\s*@?|\s+@?|\s*@)([A-Za-z0-9_.]+)$",
+    re.IGNORECASE,
+)
+# links curtos só resolvem com uma requisição (redirect), que o `prepare` não faz
+_TT_SHORT_LINK_RE = re.compile(
+    r"(?:vm|vt)\.tiktok\.com/|tiktok\.com/t/", re.IGNORECASE
+)
+
+
+def extract_tiktok_accounts(row_id: str, text: str | None) -> list[SocialAccount]:
+    """Retorna as contas de TikTok (deduplicadas) mencionadas em `text`. Aceita
+    `tiktok.com/@handle`, `tiktok.com/@handle/video/<id>` e rótulos como
+    "TikTok: @handle". Links curtos (`vm.tiktok.com/...`) não dão para resolver
+    offline: são ignorados com um aviso no log."""
+    if not text:
+        return []
+
+    found: dict[str, SocialAccount] = {}
+    for fragment in _SPLIT_RE.split(text):
+        fragment = fragment.strip()
+        if not fragment:
+            continue
+
+        handle: str | None = None
+        url_match = _TT_URL_HANDLE_RE.search(fragment)
+        if url_match:
+            handle = url_match.group(1)
+        elif _TT_SHORT_LINK_RE.search(fragment):
+            logger.warning(
+                "Linha %s: link curto do TikTok não resolvível offline, ignorado: %s",
+                row_id,
+                fragment,
+            )
+            continue
+        else:
+            label_match = _TT_LABEL_RE.match(fragment)
+            if label_match:
+                handle = label_match.group(1)
+
+        handle = handle.strip(".") if handle else None
+        if not handle:
+            continue
+
+        key = handle.lower()
+        if key not in found:
+            found[key] = SocialAccount(
+                row_id=row_id,
+                platform="tiktok",
+                handle=key,
+                url=f"https://www.tiktok.com/@{key}",
+            )
+
+    return list(found.values())
+
+
+def extract_accounts(platform: str, row_id: str, text: str | None) -> list[SocialAccount]:
+    """Despacha para o extrator da plataforma."""
+    if platform == "instagram":
+        return extract_instagram_accounts(row_id, text)
+    if platform == "tiktok":
+        return extract_tiktok_accounts(row_id, text)
+    raise ValueError(f"Plataforma não suportada: {platform}")

@@ -25,7 +25,7 @@ class ScrapingConfig(BaseModel):
     max_posts: int | None = 60
     since_date: str | None = None
     headless: bool = True
-    session_file: str = "sessions/instagram_storage_state.json"
+    session_file: str = "sessions/instagram_storage_state.json"  # só Instagram; TikTok não usa login
     delay_between_profiles_seconds: tuple[float, float] = (4, 10)
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
@@ -51,6 +51,9 @@ class MediaConfig(BaseModel):
     download_images: bool = True
     download_videos: bool = True
     max_concurrent_downloads: int = Field(default=4, gt=0)
+    # formato do yt-dlp para vídeos do TikTok; "best" = maior qualidade (costuma ser
+    # HEVC). Para H.264, mais compatível com navegadores: "best[vcodec^=h264]/best".
+    tiktok_video_format: str = "best"
 
 
 class LoggingConfig(BaseModel):
@@ -59,7 +62,7 @@ class LoggingConfig(BaseModel):
 
 
 class ZeezazumConfig(BaseModel):
-    platform: Literal["instagram"] = "instagram"
+    platform: Literal["instagram", "tiktok"] = "instagram"
     input: InputConfig
     scraping: ScrapingConfig = Field(default_factory=ScrapingConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

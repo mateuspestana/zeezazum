@@ -85,7 +85,7 @@ class RecoveryFixture(unittest.IsolatedAsyncioTestCase):
 class RecoveryTests(RecoveryFixture):
     async def test_failed_download_resume_and_no_redownload(self):
         with patch(
-            "zeezazum.platforms.instagram.downloader.MediaDownloader._fetch",
+            "zeezazum.platforms.downloader.MediaDownloader._fetch",
             new=AsyncMock(side_effect=OSError("expired URL")),
         ):
             with self.assertRaises(PersistenceFailure):
@@ -95,7 +95,7 @@ class RecoveryTests(RecoveryFixture):
         state.close()
         fetch = AsyncMock(return_value=(b"picture", "image/png"))
         with patch(
-            "zeezazum.platforms.instagram.downloader.MediaDownloader._fetch", new=fetch
+            "zeezazum.platforms.downloader.MediaDownloader._fetch", new=fetch
         ):
             await run_media_sync(self.cfg, [self.account, self.account])
             await run_media_sync(self.cfg, [self.account])
@@ -259,7 +259,7 @@ class IntegrationTests(RecoveryFixture):
                     new=AsyncMock(side_effect=failure),
                 ) as extract,
                 patch(
-                    "zeezazum.platforms.instagram.downloader.MediaDownloader._fetch",
+                    "zeezazum.platforms.downloader.MediaDownloader._fetch",
                     new=AsyncMock(return_value=(b"x", "image/jpeg")),
                 ),
             ):

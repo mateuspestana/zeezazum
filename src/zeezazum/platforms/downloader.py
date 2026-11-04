@@ -13,6 +13,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from zeezazum.models import MediaItem, MediaKind
+from zeezazum.platforms.tiktok import media as tiktok_media
 from zeezazum.storage.base import Storage
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MediaTask:
-    candidate_folder: str  # ex: "instagram/<handle>"
+    candidate_folder: str  # "<plataforma>/<handle>", ex: "instagram/fulano"
     shortcode: str
     item: MediaItem
+
+
+def _split_folder(candidate_folder: str) -> tuple[str, str]:
+    platform, _, handle = candidate_folder.partition("/")
+    return platform, handle
 
 
 def _extension_for(item: MediaItem, content_type: str | None) -> str:
@@ -42,7 +48,9 @@ class MediaDownloader:
         download_images: bool = True,
         download_videos: bool = True,
         state=None,
+        tiktok_video_format: str = tiktok_media.DEFAULT_FORMAT,
     ):
+        self._tiktok_video_format = tiktok_video_format
         self._state = state
         self._workers = max_concurrent
         self.results = {"downloaded": 0, "existing": 0, "failed": 0}
@@ -65,11 +73,13 @@ class MediaDownloader:
                         except Exception as exc:
                             self.results["failed"] += 1
                             if self._state:
+                                platform, handle = _split_folder(task.candidate_folder)
                                 self._state.finish_media(
-                                    task.candidate_folder.split("/")[-1],
+                                    handle,
                                     task.shortcode,
                                     task.item.index,
                                     str(exc),
+                                    platform=platform,
                                 )
                             logger.exception(
                                 "Falha na mídia %s: pendente para retomada",
@@ -95,21 +105,32 @@ class MediaDownloader:
         relative_base = (
             f"{task.candidate_folder}/media/{task.shortcode}_{task.item.index}"
         )
-        handle = task.candidate_folder.split("/")[-1]
+        platform, handle = _split_folder(task.candidate_folder)
         if any(
             self._storage.exists(f"{relative_base}.{ext}")
             for ext in ("jpg", "png", "mp4")
         ):
             self.results["existing"] += 1
         else:
-            content, content_type = await self._fetch(client, task.item.url)
+            if platform == "tiktok" and task.item.kind == MediaKind.VIDEO:
+                # URL do CDN expira e exige cabeçalhos: o yt-dlp resolve a partir da página
+                content = await asyncio.to_thread(
+                    tiktok_media.download_video,
+                    task.item.url,
+                    video_format=self._tiktok_video_format,
+                )
+                content_type = "video/mp4"
+            else:
+                content, content_type = await self._fetch(client, task.item.url)
             ext = _extension_for(task.item, content_type)
             await asyncio.to_thread(
                 self._storage.write_bytes, f"{relative_base}.{ext}", content
             )
             self.results["downloaded"] += 1
         if self._state:
-            self._state.finish_media(handle, task.shortcode, task.item.index)
+            self._state.finish_media(
+                handle, task.shortcode, task.item.index, platform=platform
+            )
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30)

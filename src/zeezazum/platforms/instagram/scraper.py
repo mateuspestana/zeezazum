@@ -18,6 +18,8 @@ from zeezazum.platforms.base import (
     AuthenticationRequired,
     BaseScraper,
     ProfileUnavailable,
+    apply_final_filters,
+    should_stop,
 )
 from zeezazum.platforms.instagram.parser import parse_posts_from_payload
 
@@ -198,27 +200,8 @@ class InstagramScraper(BaseScraper):
             await page.close()
 
     @staticmethod
-    def _should_stop(
-        captured: dict[str, Post],
-        max_posts: int | None,
-        since_date: datetime | None,
-        stop_at_post_id: str | None,
-    ) -> bool:
-        if max_posts is not None and len(captured) >= max_posts:
-            return True
-        if stop_at_post_id is not None and stop_at_post_id in captured:
-            return True
-        if since_date is not None:
-            # posts fixados no topo da grade podem ser bem antigos e não indicam que o
-            # scroll passou do corte — só contam posts não fixados.
-            old = sum(
-                1
-                for p in captured.values()
-                if not p.is_pinned and p.timestamp and p.timestamp < since_date
-            )
-            if old >= _CONSECUTIVE_OLD_TO_STOP:
-                return True
-        return False
+    def _should_stop(captured, max_posts, since_date, stop_at_post_id) -> bool:
+        return should_stop(captured, max_posts, since_date, stop_at_post_id)
 
     @staticmethod
     async def _read_profile_stats(page) -> dict | None:
@@ -248,23 +231,5 @@ class InstagramScraper(BaseScraper):
         }
 
     @staticmethod
-    def _apply_final_filters(
-        posts: list[Post],
-        max_posts: int | None,
-        since_date: datetime | None,
-        stop_at_post_id: str | None,
-    ) -> list[Post]:
-        result: list[Post] = []
-        for post in posts:
-            if stop_at_post_id is not None and post.shortcode == stop_at_post_id:
-                break
-            if (
-                since_date is not None
-                and post.timestamp
-                and post.timestamp < since_date
-            ):
-                break
-            result.append(post)
-            if max_posts is not None and len(result) >= max_posts:
-                break
-        return result
+    def _apply_final_filters(posts, max_posts, since_date, stop_at_post_id):
+        return apply_final_filters(posts, max_posts, since_date, stop_at_post_id)

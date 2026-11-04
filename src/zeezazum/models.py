@@ -52,3 +52,4 @@ class CandidateState:
     total_posts_seen: int = 0
     last_run_at: datetime | None = None
     media_pending: int = 0
+    platform: str = "instagram"

@@ -1,4 +1,4 @@
-platform: instagram
+platform: instagram   # instagram | tiktok (uma plataforma por execução)
 
 input:
   path: data/candidatos_instagram.parquet
@@ -11,7 +11,7 @@ scraping:
   max_posts: 60
   since_date: null       # ex: "2024-01-01" — também usado como corte no scroll
   headless: true
-  session_file: sessions/instagram_storage_state.json
+  session_file: sessions/instagram_storage_state.json   # só Instagram; o TikTok não usa login
   delay_between_profiles_seconds: [4, 10]
   retry:
     max_attempts: 3
@@ -31,6 +31,7 @@ media:
   download_images: true
   download_videos: true
   max_concurrent_downloads: 4
+  tiktok_video_format: best   # yt-dlp; para H.264: "best[vcodec^=h264]/best"
 
 logging:
   level: INFO

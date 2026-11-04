@@ -22,8 +22,9 @@ from playwright.async_api import BrowserContext, async_playwright
 from zeezazum.config import ZeezazumConfig
 from zeezazum.models import CandidateState, Post, SocialAccount, MediaItem, MediaKind
 from zeezazum.platforms.base import AuthenticationRequired, ProfileUnavailable
-from zeezazum.platforms.instagram.downloader import MediaDownloader, MediaTask
-from zeezazum.platforms.instagram.scraper import InstagramScraper
+from zeezazum.platforms import REQUIRES_LOGIN, build_scraper
+from zeezazum.platforms.base import BaseScraper
+from zeezazum.platforms.downloader import MediaDownloader, MediaTask
 from zeezazum.pipeline.state import StateStore
 from zeezazum.storage import build_storage
 from zeezazum.storage.base import Storage
@@ -50,10 +51,6 @@ def _open_state(
     if storage.exists(_STATE_KEY):
         tmp_path.write_bytes(storage.read_bytes(_STATE_KEY))
     return StateStore(tmp_path), tmp_path
-
-
-# Em "baixar tudo" o scroll só desiste após muito mais rodadas sem posts novos.
-_FETCH_ALL_STAGNANT_SCROLLS = 25
 
 
 def _parse_since_date(value: str | None) -> datetime | None:
@@ -182,6 +179,7 @@ def _carry_forward_state(
         total_posts_seen=existing.total_posts_seen if existing else 0,
         last_run_at=datetime.now(timezone.utc),
         media_pending=existing.media_pending if existing else 0,
+        platform=account.platform,
     )
 
 
@@ -189,7 +187,7 @@ async def _scrape_one(
     *,
     account: SocialAccount,
     context: BrowserContext,
-    scraper: InstagramScraper,
+    scraper: BaseScraper,
     storage: Storage,
     state: StateStore,
     queue: "MediaQueue",
@@ -201,13 +199,14 @@ async def _scrape_one(
     fetch_all: bool = False,
 ) -> None:
     """`fetch_all=True`: histórico completo — ignora `max_posts`, `since_date` e o
-    early-stop, e rola até o Instagram parar de entregar posts.
+    early-stop, e segue até a plataforma parar de entregar posts.
     `extra_posts=None` (padrão): modo incremental — para assim que reencontra o
     post mais recente já conhecido (seguro pra cron, só traz posts novos).
     `extra_posts=N`: modo backfill — ignora esse early-stop e raspa até acumular
     `total_já_conhecido + N` posts, aprofundando no histórico de contas já raspadas."""
-    existing = state.get(account.row_id, account.handle)
-    candidate_folder = f"instagram/{account.handle}"
+    existing = state.get(account.row_id, account.handle, account.platform)
+    platform = account.platform
+    candidate_folder = f"{platform}/{account.handle}"
     if existing:
         existing.total_posts_seen = _count_persisted(storage, candidate_folder)
 
@@ -243,8 +242,9 @@ async def _scrape_one(
                     exists=_media_exists(
                         storage, candidate_folder, post.shortcode, item.index
                     ),
+                    platform=platform,
                 )
-        media_enqueued += await queue.enqueue_pending(account.handle)
+        media_enqueued += await queue.enqueue_pending(account.handle, platform)
         return fresh_dicts
 
     posts: list[Post] | None = None
@@ -317,8 +317,10 @@ async def _scrape_one(
                     account.handle,
                     queue.config.media.download_images,
                     queue.config.media.download_videos,
+                    platform,
                 )
             ),
+            platform=platform,
         )
     )
     logger.info(
@@ -353,21 +355,25 @@ class MediaQueue:
             max_concurrent=config.media.max_concurrent_downloads,
             download_images=config.media.download_images,
             download_videos=config.media.download_videos,
+            tiktok_video_format=config.media.tiktok_video_format,
         )
         self.consumer = asyncio.create_task(self.downloader.run(self.queue))
 
-    async def enqueue_pending(self, handle):
+    async def enqueue_pending(self, handle, platform="instagram"):
         count = 0
         for code, index, kind, url in self.state.pending_media(
-            handle, self.config.media.download_images, self.config.media.download_videos
+            handle,
+            self.config.media.download_images,
+            self.config.media.download_videos,
+            platform,
         ):
-            key = (handle, code, index)
+            key = (platform, handle, code, index)
             if key in self.scheduled:
                 continue
             self.scheduled.add(key)
             await self.queue.put(
                 MediaTask(
-                    f"instagram/{handle}", code, MediaItem(MediaKind(kind), url, index)
+                    f"{platform}/{handle}", code, MediaItem(MediaKind(kind), url, index)
                 )
             )
             count += 1
@@ -375,8 +381,10 @@ class MediaQueue:
 
     async def reconcile(self, accounts):
         queued = {}
-        for handle in dict.fromkeys(a.handle.lower() for a in accounts):
-            folder = f"instagram/{handle}"
+        for platform, handle in dict.fromkeys(
+            (a.platform, a.handle.lower()) for a in accounts
+        ):
+            folder = f"{platform}/{handle}"
             if self.storage.exists(f"{folder}/posts.json"):
                 for post in self.storage.read_json(f"{folder}/posts.json"):
                     for m in post.get("media", []):
@@ -388,8 +396,9 @@ class MediaQueue:
                             exists=_media_exists(
                                 self.storage, folder, post["shortcode"], item.index
                             ),
+                            platform=platform,
                         )
-            queued[handle] = await self.enqueue_pending(handle)
+            queued[handle] = await self.enqueue_pending(handle, platform)
         return queued
 
     async def close(self):
@@ -482,15 +491,22 @@ async def _run(config, accounts, extra_posts=None, media_only=False, fetch_all=F
                     headless=config.scraping.headless
                 )
                 try:
-                    session = Path(config.scraping.session_file)
-                    context = await browser.new_context(
-                        storage_state=str(session) if session.exists() else None,
-                        viewport={"width": 1280, "height": 900},
-                    )
-                    scraper = InstagramScraper(
-                        scroll_delay_range=(1.5, 3.5),
-                        max_stagnant_scrolls=_FETCH_ALL_STAGNANT_SCROLLS if fetch_all else None,
-                    )
+                    contexts: dict = {}
+                    scrapers: dict = {}
+
+                    async def context_for(platform):
+                        # só o Instagram usa sessão autenticada; TikTok navega anônimo
+                        if platform not in contexts:
+                            session = Path(config.scraping.session_file)
+                            use_session = (
+                                REQUIRES_LOGIN.get(platform) and session.exists()
+                            )
+                            contexts[platform] = await browser.new_context(
+                                storage_state=str(session) if use_session else None,
+                                viewport={"width": 1280, "height": 900},
+                            )
+                        return contexts[platform]
+
                     for i, account in enumerate(accounts):
                         if i:
                             await asyncio.sleep(
@@ -499,10 +515,15 @@ async def _run(config, accounts, extra_posts=None, media_only=False, fetch_all=F
                                 )
                             )
                         checkpoints.check()
+                        platform = account.platform
+                        if platform not in scrapers:
+                            scrapers[platform] = build_scraper(
+                                platform, fetch_all=fetch_all
+                            )
                         await _scrape_one(
                             account=account,
-                            context=context,
-                            scraper=scraper,
+                            context=await context_for(platform),
+                            scraper=scrapers[platform],
                             storage=storage,
                             state=state,
                             queue=media,
