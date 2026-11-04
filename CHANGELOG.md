@@ -33,9 +33,13 @@ Busca de vídeos do TikTok. Esta é a versão publicada (tag e release) das iter
 ### Verificado ao vivo (2026-11-04)
 - Busca `jair bolsonaro`: 149 posts em 34 s, com o TikTok avisando o fim da lista
   (`has_more: 0`), de nov/2025 a nov/2026, 127 autores. Busca `lula`: 119 posts.
-- **Não re-verificado:** a rolagem nova (`scrollIntoView`) vale também para as tags, mas
-  nenhuma coleta de tag foi concluída depois da mudança: a sessão foi bloqueada antes
-  (veja abaixo). Os números de profundidade das tags (0.3.2) são da rolagem anterior.
+- Tag com a rolagem nova: `#bolsonaro` entregou 243 posts em 28 s, com o TikTok avisando
+  o fim da lista (re-verificado depois de uma nova sessão; o bloqueio descrito abaixo
+  tinha impedido a primeira tentativa).
+- Fluxo completo pela CLI (`prepare` + `scrape`, `max_posts: 5`), em perfil, tag e busca:
+  5 mp4 válidos e 5 capas JPEG em cada, com `posts.parquet`. Perfil não precisa de
+  sessão; tag e busca precisam. O download de vídeo vindo de busca também foi
+  confirmado isoladamente (3,9 MB, mp4 válido).
 
 ### Limitações conhecidas
 - **A sessão não é duradoura.** Depois de umas dez coletas e sondagens seguidas em cerca

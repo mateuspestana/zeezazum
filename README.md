@@ -153,8 +153,7 @@ o `max_posts` valem no final, sobre o que foi capturado); a coleta termina em
 `max_posts`, quando o TikTok avisa o fim da lista ou quando a página para de trazer
 posts novos. **O TikTok limita a profundidade de cada tag**: medido em novembro de 2026,
 `#bolsonaro` entregou 226 posts (de março de 2022 a novembro de 2026), `#lula` 207 e
-`#eleicoes2026` 213, cada uma em cerca de 25 segundos (com a rolagem da 0.3.2; a da 0.3.3
-não foi re-verificada ao vivo nas tags), e a API avisou `hasMore: false`
+`#eleicoes2026` 213, cada uma em cerca de 25 segundos e a API avisou `hasMore: false`
 ali. Rolar mais não adianta, e `max_posts` acima disso não muda nada. Para ir além, rode
 o `scrape` de novo de tempos em tempos: cada passada pega os posts mais recentes e o que
 já está salvo não é refeito, então o acervo cresce com as execuções. Para o histórico
