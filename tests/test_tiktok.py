@@ -12,12 +12,18 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import polars as pl
+import typer
 from typer.testing import CliRunner
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from zeezazum.cli import app
 from zeezazum.config import ZeezazumConfig
-from zeezazum.input.url_parser import extract_accounts, extract_tiktok_accounts
+from zeezazum.input.url_parser import (
+    extract_accounts,
+    extract_tiktok_accounts,
+    extract_tiktok_searches,
+    extract_tiktok_tags,
+)
 from zeezazum.models import (
     CandidateState,
     MediaItem,
@@ -34,11 +40,17 @@ from zeezazum.pipeline.orchestrator import (
 )
 from zeezazum.pipeline.state import StateStore
 from zeezazum.platforms import build_scraper
-from zeezazum.platforms.base import ProfileUnavailable
+from zeezazum.platforms.base import AuthenticationRequired, ProfileUnavailable
 from zeezazum.platforms.instagram.scraper import InstagramScraper
 from zeezazum.platforms.tiktok import media as tiktok_media
-from zeezazum.platforms.tiktok.parser import parse_entry, parse_user_detail
-from zeezazum.platforms.tiktok.scraper import TikTokScraper
+from zeezazum.platforms.tiktok.parser import parse_entry, parse_item, parse_user_detail
+from zeezazum.platforms.tiktok.scraper import CaptchaRequired, TikTokScraper
+from zeezazum.platforms.tiktok import session as tiktok_session
+from zeezazum.platforms.tiktok.tag_scraper import (
+    SCROLL_JS,
+    TikTokSearchScraper,
+    TikTokTagScraper,
+)
 from zeezazum.storage.local import LocalStorage
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiktok_flat_entries.json"
@@ -569,6 +581,607 @@ class ConfigAndCliTests(unittest.TestCase):
                 "--platform", "orkut", "--output", str(Path(tmp) / "o.csv"),
             ])
             self.assertNotEqual(result.exit_code, 0)
+
+
+def captcha_context(captcha, udr_scope=None):
+    """Contexto falso: a página embute o perfil e mostra (ou não) o captcha."""
+    udr = json.dumps({"__DEFAULT_SCOPE__": {"webapp.user-detail": udr_scope or {}}})
+
+    async def evaluate(script):
+        return captcha if script == tiktok_session.CAPTCHA_JS else udr
+
+    context = fake_context(udr_scope or {})
+    context.new_page.return_value.evaluate = AsyncMock(side_effect=evaluate)
+    return context
+
+
+EXISTE = {"statusCode": 0, "userInfo": {"user": {}, "stats": {"videoCount": 5}}}
+
+
+class CaptchaTests(unittest.IsolatedAsyncioTestCase):
+    async def test_listagem_esgotada_com_captcha_pede_resolucao_manual(self):
+        scraper = scraper_with(None, listing_attempts=2, captcha_timeout=0)
+        with self.assertRaises(CaptchaRequired) as ctx:
+            await extract(scraper, captcha_context(True, EXISTE))
+        self.assertIsInstance(ctx.exception, AuthenticationRequired)  # para o lote, exit 3
+        self.assertIn("tiktok-session", str(ctx.exception))
+        self.assertIn("@alice", str(ctx.exception))
+
+    async def test_sem_captcha_na_tela_continua_sendo_erro_comum(self):
+        scraper = scraper_with(None, listing_attempts=2, captcha_timeout=0)
+        with self.assertRaises(RuntimeError) as ctx:
+            await extract(scraper, captcha_context(False, EXISTE))
+        self.assertNotIsInstance(ctx.exception, AuthenticationRequired)
+
+    async def test_captcha_na_tela_mas_listagem_funcionou_nao_incomoda_ninguem(self):
+        # o captcha aparece em quase toda abertura anônima; só importa se a lista falhar
+        scraper = scraper_with([entry(1), entry(2)])
+        posts = await extract(scraper, captcha_context(True, EXISTE))
+        self.assertEqual(len(posts), 2)
+
+    async def test_lista_parcial_nao_vira_pedido_de_captcha(self):
+        items = [entry(i, i) for i in range(5, 0, -1)]
+        scraper = scraper_with((items, 2), listing_attempts=2, captcha_timeout=0)
+        with self.assertRaises(RuntimeError) as ctx:
+            await extract(scraper, captcha_context(True, EXISTE))
+        self.assertNotIsInstance(ctx.exception, AuthenticationRequired)
+
+    async def test_mensagem_muda_quando_ja_existe_sessao_salva(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "tt.json"
+            state.write_text(json.dumps({"cookies": []}))
+            scraper = scraper_with(None, listing_attempts=1, captcha_timeout=0, session_file=state)
+            with self.assertRaises(CaptchaRequired) as ctx:
+                await extract(scraper, captcha_context(True, EXISTE))
+        self.assertIn("não bastou", str(ctx.exception))
+
+
+class SessionTests(unittest.TestCase):
+    STATE = {
+        "cookies": [
+            {"name": "ttwid", "value": "abc", "domain": ".tiktok.com", "path": "/",
+             "expires": 1900000000.5, "httpOnly": True, "secure": True},
+            {"name": "msToken", "value": "xyz", "domain": "www.tiktok.com", "path": "/",
+             "expires": -1, "httpOnly": False, "secure": False},
+            {"name": "outro", "value": "1", "domain": ".example.com", "path": "/", "expires": -1},
+        ],
+        "origins": [],
+    }
+
+    def test_storage_state_vira_cookies_netscape(self):
+        lines = tiktok_session.storage_state_to_netscape(self.STATE).splitlines()
+        self.assertEqual(lines[0], "# Netscape HTTP Cookie File")
+        self.assertEqual(lines[1], "#HttpOnly_.tiktok.com\tTRUE\t/\tTRUE\t1900000000\tttwid\tabc")
+        self.assertEqual(lines[2], "www.tiktok.com\tFALSE\t/\tFALSE\t0\tmsToken\txyz")
+        self.assertEqual(len(lines), 3)  # cookie de outro domínio não entra
+
+    def test_yt_dlp_consegue_ler_o_arquivo_gerado(self):
+        from http.cookiejar import MozillaCookieJar
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.txt"
+            path.write_text(tiktok_session.storage_state_to_netscape(self.STATE))
+            from yt_dlp.cookies import YoutubeDLCookieJar
+
+            jar = YoutubeDLCookieJar(str(path))
+            jar.load(ignore_discard=True, ignore_expires=True)
+            self.assertEqual({c.name: c.value for c in jar}, {"ttwid": "abc", "msToken": "xyz"})
+
+    def _poll(self, states, closed=False, **kw):
+        """`states`: lista de (captcha_na_tela, links_de_video), um por verificação."""
+        steps = list(states)
+        idx = [0]
+
+        current = [steps[0]]
+
+        def evaluate(script):
+            if script == tiktok_session.CAPTCHA_JS:  # toda verificação começa por aqui
+                current[0] = steps[min(idx[0], len(steps) - 1)]
+                idx[0] += 1
+                return current[0][0]
+            return current[0][1]
+
+        page = MagicMock()
+        page.evaluate = MagicMock(side_effect=evaluate)
+        page.is_closed = MagicMock(return_value=closed)
+        t = [0.0]
+
+        def sleep(_):
+            t[0] += 1
+
+        ok = tiktok_session.wait_until_solved(
+            page, sleep=sleep, clock=lambda: t[0], echo=lambda *_: None, **kw
+        )
+        return ok, idx[0], t[0]
+
+    def test_resolvido_so_com_captcha_fora_e_videos_na_tela_por_3_checagens(self):
+        ok, checks, _ = self._poll([(True, 0), (False, 5), (False, 5), (False, 5)])
+        self.assertTrue(ok)
+        self.assertEqual(checks, 4)
+
+    def test_fechar_o_modal_sem_resolver_nao_conta(self):
+        # o captcha some, mas a página segue sem vídeos: não é sessão válida
+        ok, _, elapsed = self._poll([(False, 0)], timeout=20)
+        self.assertFalse(ok)
+        self.assertEqual(elapsed, 20)
+
+    def test_captcha_que_volta_zera_a_contagem(self):
+        ok, checks, _ = self._poll([(False, 5), (False, 5), (True, 0), (False, 5), (False, 5), (False, 5)])
+        self.assertTrue(ok)
+        self.assertEqual(checks, 6)
+
+    def test_janela_fechada_encerra_a_espera_sem_aprovar(self):
+        page = MagicMock()
+        page.evaluate = MagicMock(side_effect=Exception("closed"))
+        page.is_closed = MagicMock(return_value=True)
+        ok = tiktok_session.wait_until_solved(page, sleep=lambda _: None, echo=lambda *_: None)
+        self.assertFalse(ok)
+
+    def test_scraper_entrega_os_cookies_da_sessao_ao_yt_dlp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "tt.json"
+            state.write_text(json.dumps(self.STATE))
+            scraper = TikTokScraper(session_file=state)
+            ydl = scraper._ydl_factory()
+            cookiefile = ydl.params["cookiefile"]
+            self.assertIn("ttwid", Path(cookiefile).read_text())
+            ydl.close()
+
+    def test_sem_sessao_o_yt_dlp_segue_anonimo(self):
+        ydl = TikTokScraper(session_file="/nao/existe.json")._ydl_factory()
+        self.assertNotIn("cookiefile", ydl.params)
+        ydl.close()
+
+    def test_sessao_corrompida_nao_derruba_a_coleta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "tt.json"
+            state.write_text("{lixo")
+            ydl = TikTokScraper(session_file=state)._ydl_factory()
+            self.assertNotIn("cookiefile", ydl.params)
+            ydl.close()
+
+    def test_orquestrador_so_usa_sessao_que_existe(self):
+        from zeezazum.pipeline.orchestrator import _session_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config(tmp)
+            cfg.scraping.tiktok_session_file = str(Path(tmp) / "tt.json")
+            self.assertIsNone(_session_file(cfg, "tiktok"))
+            Path(cfg.scraping.tiktok_session_file).write_text("{}")
+            self.assertEqual(_session_file(cfg, "tiktok"), Path(cfg.scraping.tiktok_session_file))
+            cfg.scraping.session_file = str(Path(tmp) / "ig.json")
+            self.assertIsNone(_session_file(cfg, "instagram"))  # login ainda não feito
+            Path(cfg.scraping.session_file).write_text("{}")
+            self.assertEqual(_session_file(cfg, "instagram"), Path(cfg.scraping.session_file))
+
+    def test_cli_para_o_lote_com_codigo_3_e_mostra_a_orientacao(self):
+        from zeezazum.cli import _execute
+
+        async def blocked():
+            raise CaptchaRequired("rode tiktok-session")
+
+        with self.assertRaises(typer.Exit) as ctx:
+            _execute(blocked())
+        self.assertEqual(ctx.exception.exit_code, 3)
+
+    def test_comando_tiktok_session_salva_no_caminho_do_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.yaml"
+            cfg.write_text(
+                "input: {path: x, url_column: u, id_column: i}\n"
+                f"scraping: {{tiktok_session_file: {tmp}/s/tt.json}}\n"
+            )
+            with patch("zeezazum.platforms.tiktok.session.capture_session", return_value=True) as cap:
+                result = CliRunner().invoke(app, ["tiktok-session", "--config", str(cfg)])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(cap.call_args.args[0], Path(f"{tmp}/s/tt.json"))
+
+    def test_comando_abre_a_busca_e_a_tag_pedidas_na_mesma_sessao(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(Path(tmp) / "tt.json")
+            for args, urls in (
+                (["--search", "jair bolsonaro"], ["https://www.tiktok.com/search/video?q=jair+bolsonaro"]),
+                (["--tag", "#Lula"], ["https://www.tiktok.com/tag/Lula"]),
+                (["--tag", "a", "--search", "b"],
+                 ["https://www.tiktok.com/tag/a", "https://www.tiktok.com/search/video?q=b"]),
+            ):
+                with patch("zeezazum.platforms.tiktok.session.capture_session", return_value=True) as cap:
+                    result = CliRunner().invoke(app, ["tiktok-session", "--output", out, *args])
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertEqual(cap.call_args.kwargs["urls"], urls)
+
+    def test_comando_falha_e_avisa_que_a_sessao_existente_foi_mantida(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("zeezazum.platforms.tiktok.session.capture_session", return_value=False):
+                result = CliRunner().invoke(
+                    app, ["tiktok-session", "--output", str(Path(tmp) / "tt.json")]
+                )
+            self.assertEqual(result.exit_code, 1)
+            self.assertIn("foi mantida", result.output)
+            self.assertNotIn("Sessão salva", result.output)
+
+
+def web_item(post_id, days_ago=0, user="bia", **extra):
+    """Item no formato da API web (`/api/challenge/item_list/`)."""
+    when = datetime(2026, 10, 30, tzinfo=timezone.utc) - timedelta(days=days_ago)
+    return {
+        "id": str(post_id),
+        "desc": f"post {post_id} #bolsonaro #lula @amigo",
+        "createTime": str(int(when.timestamp())),
+        "author": {"uniqueId": user, "id": "777"},
+        "stats": {"diggCount": 5, "commentCount": 2, "playCount": 90, "shareCount": 1, "collectCount": 3},
+        "video": {"duration": 12, "cover": "https://cdn/c.jpg", "originCover": "https://cdn/o.jpg"},
+        "music": {"title": "som", "authorName": "dj"},
+        "textExtra": [{"hashtagName": "bolsonaro"}, {"hashtagName": "lula"}],
+        **extra,
+    }
+
+
+class TagParserTests(unittest.TestCase):
+    def test_item_de_video(self):
+        post = parse_item(web_item(42))
+        self.assertEqual(post.shortcode, "42")
+        self.assertEqual(post.post_url, "https://www.tiktok.com/@bia/video/42")
+        self.assertEqual([(m.kind, m.url) for m in post.media], [
+            (MediaKind.VIDEO, "https://www.tiktok.com/@bia/video/42"),
+            (MediaKind.IMAGE, "https://cdn/o.jpg"),  # capa original tem preferência
+        ])
+        m = post.metrics
+        self.assertEqual((m["like_count"], m["comment_count"], m["view_count"]), (5, 2, 90))
+        self.assertEqual((m["share_count"], m["save_count"], m["video_duration"]), (1, 3, 12))
+        self.assertEqual(m["hashtags"], ["bolsonaro", "lula"])
+        self.assertEqual((m["owner_username"], m["owner_id"], m["audio_artist"]), ("bia", "777", "dj"))
+        self.assertEqual(post.timestamp.year, 2026)
+
+    def test_slideshow_baixa_as_fotos_e_nao_enfileira_video(self):
+        imgs = {"images": [{"imageURL": {"urlList": ["https://cdn/1.jpg"]}},
+                           {"imageURL": {"urlList": ["https://cdn/2.jpg", "x"]}}]}
+        post = parse_item(web_item(7, imagePost=imgs))
+        self.assertIn("/photo/7", post.post_url)
+        self.assertEqual([(m.kind, m.url, m.index) for m in post.media],
+                         [(MediaKind.IMAGE, "https://cdn/1.jpg", 0), (MediaKind.IMAGE, "https://cdn/2.jpg", 1)])
+        self.assertEqual(post.metrics["media_type_label"], "photo")
+
+    def test_autor_como_texto_e_hashtags_da_legenda(self):
+        item = web_item(9, author="carlos")
+        del item["textExtra"]
+        post = parse_item(item)
+        self.assertEqual(post.metrics["owner_username"], "carlos")
+        self.assertEqual(post.metrics["hashtags"], ["bolsonaro", "lula"])
+
+    def test_live_e_lixo_viram_none(self):
+        self.assertIsNone(parse_item(web_item(1, liveRoomInfo={"x": 1})))
+        self.assertIsNone(parse_item(web_item("abc")))
+        self.assertIsNone(parse_item({"id": "5"}))  # sem autor
+        self.assertIsNone(parse_item("lixo"))
+
+
+class TagInputTests(unittest.TestCase):
+    def handles(self, text):
+        return [a.handle for a in extract_tiktok_tags("1", text)]
+
+    def test_formatos(self):
+        self.assertEqual(self.handles("https://www.tiktok.com/tag/Bolsonaro"), ["bolsonaro"])
+        self.assertEqual(self.handles("#Lula"), ["lula"])
+        self.assertEqual(self.handles("eleicoes2026"), ["eleicoes2026"])
+
+    def test_varias_separadas_e_deduplicadas(self):
+        self.assertEqual(
+            self.handles("#bolsonaro, #Lula; tiktok.com/tag/bolsonaro\n#ciro"),
+            ["bolsonaro", "lula", "ciro"],
+        )
+
+    def test_unicode_e_url_codificada(self):
+        self.assertEqual(self.handles("https://www.tiktok.com/tag/elei%C3%A7%C3%A3o"), ["eleição"])
+        acc = extract_tiktok_tags("1", "#eleição")[0]
+        self.assertEqual(acc.url, "https://www.tiktok.com/tag/elei%C3%A7%C3%A3o")
+        self.assertEqual(acc.platform, "tiktok_tag")
+
+    def test_perfil_e_video_nao_viram_tag(self):
+        self.assertEqual(self.handles("https://www.tiktok.com/@fulano"), [])
+        self.assertEqual(self.handles("https://www.tiktok.com/@fulano/video/123"), [])
+        self.assertEqual(self.handles(""), [])
+        self.assertEqual(self.handles(None), [])
+
+    def test_despacho_e_registro(self):
+        self.assertEqual(extract_accounts("tiktok_tag", "1", "#a")[0].platform, "tiktok_tag")
+        from zeezazum.platforms import PLATFORMS, REQUIRES_LOGIN
+
+        self.assertIn("tiktok_tag", PLATFORMS)
+        self.assertFalse(REQUIRES_LOGIN["tiktok_tag"])
+        self.assertIsInstance(build_scraper("tiktok_tag"), TikTokTagScraper)
+        self.assertEqual(config(".", "tiktok_tag").platform, "tiktok_tag")
+
+    def test_prepare_tiktok_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "in.csv"
+            pl.DataFrame({"id": ["1", "2"], "t": ["#bolsonaro #lula", "tiktok.com/tag/ciro"]}).write_csv(src)
+            out = Path(tmp) / "o.csv"
+            result = CliRunner().invoke(app, [
+                "prepare", "--input", str(src), "--column", "t", "--id-column", "id",
+                "--platform", "tiktok_tag", "--output", str(out),
+            ])
+            self.assertEqual(result.exit_code, 0, result.output)
+            df = pl.read_csv(out)
+            self.assertEqual(df["handle"].to_list(), ["bolsonaro", "lula", "ciro"])
+            self.assertIn("tiktok_tag_url", df.columns)
+
+
+TAG_API = "https://www.tiktok.com/api/challenge/item_list/?x=1"
+SEARCH_API = "https://www.tiktok.com/api/search/item/full/?x=1"
+
+
+class FakeResponse:
+    def __init__(self, payload, url=TAG_API):
+        self.url, self._payload = url, payload
+
+    async def json(self):
+        if self._payload is None:
+            raise ValueError("corpo vazio")  # 200 com 0 bytes
+        return self._payload
+
+
+class FakeTagPage:
+    """Entrega o lote 0 no `goto` e um lote novo a cada rolagem, pelo listener de
+    `response` que o scraper registrou (como o navegador faria)."""
+
+    def __init__(self, batches, captcha=False, finish_flag=False, search=False):
+        self.search = search  # busca: `item_list` + `has_more` (0/1); tag: `itemList` + `hasMore`
+        self.finish_flag = finish_flag  # True: o último lote traz hasMore=False
+        self.batches, self.captcha, self.sent, self.scrolls = list(batches), captcha, 0, 0
+        self.handler = None
+        self.close = AsyncMock()
+
+    def on(self, event, handler):
+        assert event == "response"
+        self.handler = handler
+
+    async def _deliver(self):
+        if self.sent < len(self.batches):
+            batch, self.sent = self.batches[self.sent], self.sent + 1
+            more = self.sent < len(self.batches) or not self.finish_flag
+            if batch is None:
+                payload = None
+            elif self.search:
+                payload = {"item_list": batch, "has_more": int(more), "cursor": 12 * self.sent}
+            else:
+                payload = {"itemList": batch, "hasMore": more}
+            await self.handler(FakeResponse(payload, url=SEARCH_API if self.search else TAG_API))
+            await self.handler(FakeResponse({"itemList": [web_item(999)]}, url="https://x/api/other/"))
+
+    async def goto(self, url, **kw):
+        self.url = url
+        await self._deliver()
+
+    async def evaluate(self, script):
+        from zeezazum.platforms.tiktok.tag_scraper import SCROLL_JS
+
+        if script == SCROLL_JS:  # rolagem por JS (mouse.wheel é travado pelo modal de login)
+            self.scrolls += 1
+            await self._deliver()
+            return None
+        return self.captcha
+
+
+def tag_context(page):
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    return context
+
+
+def tag_scraper(**kw):
+    kw.setdefault("scroll_delay", 0)
+    kw.setdefault("first_load_timeout", 0)
+    return TikTokTagScraper(**kw)
+
+
+async def extract_tag(scraper, page, handle="bolsonaro", **overrides):
+    kwargs = dict(max_posts=None, since_date=None, stop_at_post_id=None)
+    kwargs.update(overrides)
+    return await scraper.extract_posts(tag_context(page), handle, **kwargs)
+
+
+class TagScraperTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rola_captura_e_ordena_do_mais_novo(self):
+        page = FakeTagPage([[web_item(1, 5), web_item(2, 1)], [web_item(3, 3), web_item(2, 1)]])
+        posts = await extract_tag(tag_scraper(max_stagnant_scrolls=2), page)
+        self.assertEqual([p.shortcode for p in posts], ["2", "3", "1"])  # sem duplicar, sem o payload de outra URL
+        self.assertEqual(page.url, "https://www.tiktok.com/tag/bolsonaro")
+
+    async def test_para_quando_a_pagina_deixa_de_trazer_posts_novos(self):
+        page = FakeTagPage([[web_item(1)], [web_item(2)]])
+        await extract_tag(tag_scraper(max_stagnant_scrolls=3), page)
+        # 1 rolagem traz o 2º lote, 2 rolagens seguem sem novidade; na 3ª estagnação para sem rolar
+        self.assertEqual(page.scrolls, 4)
+
+    async def test_para_assim_que_o_tiktok_avisa_o_fim_da_lista(self):
+        page = FakeTagPage([[web_item(1)], [web_item(2)], [web_item(3)]], finish_flag=True)
+        posts = await extract_tag(tag_scraper(max_stagnant_scrolls=50), page)
+        self.assertEqual(len(posts), 3)
+        self.assertEqual(page.scrolls, 2)  # não gasta as 50 rolagens de estagnação
+
+    async def test_rola_por_js_e_nunca_pela_roda_do_mouse(self):
+        page = FakeTagPage([[web_item(1)], [web_item(2)]], finish_flag=True)
+        page.mouse = MagicMock()
+        await extract_tag(tag_scraper(max_stagnant_scrolls=3), page)
+        page.mouse.wheel.assert_not_called()
+
+    async def test_max_posts_para_a_rolagem(self):
+        page = FakeTagPage([[web_item(i, i)] for i in range(1, 20)])
+        posts = await extract_tag(tag_scraper(max_stagnant_scrolls=5), page, max_posts=3)
+        self.assertEqual(len(posts), 3)
+        self.assertLess(page.scrolls, 6)
+
+    async def test_since_date_filtra_no_final_sem_cortar_a_rolagem_antes(self):
+        # a lista da tag não é cronológica: um post antigo no meio não encerra a coleta
+        page = FakeTagPage([[web_item(1, 100)], [web_item(2, 1)], [web_item(3, 2)]])
+        since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        posts = await extract_tag(tag_scraper(max_stagnant_scrolls=2), page, since_date=since)
+        self.assertEqual([p.shortcode for p in posts], ["2", "3"])
+
+    async def test_stop_at_post_id_e_ignorado(self):
+        page = FakeTagPage([[web_item(1, 1), web_item(2, 2), web_item(3, 3)]])
+        posts = await extract_tag(tag_scraper(max_stagnant_scrolls=1), page, stop_at_post_id="1")
+        self.assertEqual(len(posts), 3)
+
+    async def test_sem_posts_e_com_captcha_pede_resolucao_manual(self):
+        page = FakeTagPage([None], captcha=True)  # item_list com 0 bytes
+        with self.assertRaises(CaptchaRequired) as ctx:
+            await extract_tag(tag_scraper(max_stagnant_scrolls=1), page)
+        self.assertIn("tiktok-session", str(ctx.exception))
+        self.assertIn("#bolsonaro", str(ctx.exception))
+        self.assertIn("necessária", str(ctx.exception))
+        page.close.assert_awaited()
+
+    async def test_com_sessao_salva_a_mensagem_diz_que_nao_bastou(self):
+        page = FakeTagPage([None], captcha=True)
+        with self.assertRaises(CaptchaRequired) as ctx:
+            await extract_tag(tag_scraper(max_stagnant_scrolls=1, session_file="s/tt.json"), page)
+        self.assertIn("não bastou", str(ctx.exception))
+
+    async def test_sem_posts_e_sem_captcha_devolve_lista_vazia(self):
+        page = FakeTagPage([[]], captcha=False)
+        self.assertEqual(await extract_tag(tag_scraper(max_stagnant_scrolls=1), page), [])
+
+    async def test_checkpoints_periodicos(self):
+        page = FakeTagPage([[web_item(i, i) for i in range(1, 8)]])
+        seen = []
+
+        async def on_checkpoint(batch):
+            seen.append(len(batch))
+
+        with patch("zeezazum.platforms.tiktok.tag_scraper.CHECKPOINT_EVERY", 3):
+            await extract_tag(tag_scraper(max_stagnant_scrolls=1), page, on_checkpoint=on_checkpoint)
+        self.assertEqual(seen, [7])
+
+
+class SearchInputTests(unittest.TestCase):
+    def pairs(self, text):
+        return [(a.handle, a.url) for a in extract_tiktok_searches("1", text)]
+
+    def test_todos_os_formatos_viram_a_mesma_busca(self):
+        want = [("jair+bolsonaro", "https://www.tiktok.com/search/video?q=jair+bolsonaro")]
+        for text in (
+            "jair bolsonaro",
+            "Jair  Bolsonaro",
+            "https://www.tiktok.com/search/video?q=jair%20bolsonaro",
+            "tiktok.com/search?q=Jair+Bolsonaro&t=123",
+            "tiktok.com/search/jair+bolsonaro",
+            "https://www.tiktok.com/search/video/jair+bolsonaro",
+        ):
+            self.assertEqual(self.pairs(text), want, text)
+
+    def test_varias_buscas_por_linha_ou_ponto_e_virgula_e_deduplicadas(self):
+        self.assertEqual(
+            [h for h, _ in self.pairs("lula; jair bolsonaro\nLULA\n")], ["lula", "jair+bolsonaro"]
+        )
+
+    def test_caracteres_reservados_nao_quebram_o_caminho_da_pasta(self):
+        (handle, url), = self.pairs("c++ e a/b")
+        self.assertEqual(handle, "c%2B%2B+e+a%2Fb")
+        self.assertNotIn("/", handle)
+        self.assertEqual(url, "https://www.tiktok.com/search/video?q=c%2B%2B+e+a%2Fb")
+
+    def test_acentos_ficam_legiveis(self):
+        self.assertEqual([h for h, _ in self.pairs("eleição 2026")], ["eleição+2026"])
+
+    def test_links_que_nao_sao_busca_e_vazios_sao_ignorados(self):
+        for text in ("https://www.tiktok.com/@fulano", "https://www.tiktok.com/tag/lula",
+                     "tiktok.com/search", "tiktok.com/search/video", "", None, "  ; \n "):
+            self.assertEqual(self.pairs(text), [], text)
+
+    def test_despacho_registro_e_prepare(self):
+        from zeezazum.platforms import DISPLAY_NAMES, PLATFORMS, REQUIRES_LOGIN, TIKTOK_PLATFORMS
+
+        self.assertEqual(extract_accounts("tiktok_search", "1", "lula")[0].platform, "tiktok_search")
+        self.assertIn("tiktok_search", PLATFORMS)
+        self.assertIn("tiktok_search", TIKTOK_PLATFORMS)
+        self.assertFalse(REQUIRES_LOGIN["tiktok_search"])
+        self.assertIn("buscas", DISPLAY_NAMES["tiktok_search"])
+        self.assertIsInstance(build_scraper("tiktok_search"), TikTokSearchScraper)
+        self.assertEqual(config(".", "tiktok_search").platform, "tiktok_search")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "in.csv"
+            pl.DataFrame({"id": ["1"], "q": ["jair bolsonaro; lula"]}).write_csv(src)
+            out = Path(tmp) / "o.csv"
+            result = CliRunner().invoke(app, [
+                "prepare", "--input", str(src), "--column", "q", "--id-column", "id",
+                "--platform", "tiktok_search", "--output", str(out),
+            ])
+            self.assertEqual(result.exit_code, 0, result.output)
+            df = pl.read_csv(out)
+            self.assertEqual(df["handle"].to_list(), ["jair+bolsonaro", "lula"])
+            self.assertIn("tiktok_search_url", df.columns)
+
+
+class SearchScraperTests(unittest.IsolatedAsyncioTestCase):
+    async def test_abre_a_url_da_aba_de_videos_e_le_item_list(self):
+        scraper = TikTokSearchScraper(scroll_delay=0, first_load_timeout=0, max_stagnant_scrolls=2)
+        page = FakeTagPage([[web_item(1, 3), web_item(2, 1)]], search=True, finish_flag=True)
+        posts = await extract_tag(scraper, page, handle="jair+bolsonaro")
+        self.assertEqual(page.url, "https://www.tiktok.com/search/video?q=jair+bolsonaro")
+        self.assertEqual([p.shortcode for p in posts], ["2", "1"])
+
+    async def test_has_more_zero_encerra_a_coleta(self):
+        scraper = TikTokSearchScraper(scroll_delay=0, first_load_timeout=0, max_stagnant_scrolls=50)
+        page = FakeTagPage([[web_item(1)], [web_item(2)], [web_item(3)]], search=True, finish_flag=True)
+        posts = await extract_tag(scraper, page, handle="lula")
+        self.assertEqual((len(posts), page.scrolls), (3, 2))
+
+    async def test_scraper_de_tag_ignora_respostas_da_busca(self):
+        page = FakeTagPage([[web_item(1)]], search=True)
+        posts = await extract_tag(tag_scraper(max_stagnant_scrolls=1), page)
+        self.assertEqual(posts, [])
+
+    async def test_sem_resultado_e_com_captcha_orienta_o_comando_da_busca(self):
+        scraper = TikTokSearchScraper(scroll_delay=0, first_load_timeout=0, max_stagnant_scrolls=1)
+        page = FakeTagPage([None], captcha=True, search=True)
+        with self.assertRaises(CaptchaRequired) as ctx:
+            await extract_tag(scraper, page, handle="jair+bolsonaro")
+        self.assertIn('--search "jair bolsonaro"', str(ctx.exception))
+        self.assertIn("busca «jair bolsonaro»", str(ctx.exception))
+
+    def test_anuncios_nao_viram_posts(self):
+        self.assertIsNone(parse_item(web_item(5, isAd=True)))
+        self.assertIsNotNone(parse_item(web_item(5, isAd=False)))
+
+    def test_rolagem_traz_o_ultimo_video_para_a_vista(self):
+        # na busca o documento não rola; só scrollIntoView do último vídeo dispara as páginas
+        self.assertIn("scrollIntoView", SCROLL_JS)
+        self.assertIn("scrollTo", SCROLL_JS)
+
+
+class TagPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tag_grava_em_tiktok_tag_e_baixa_video_com_ytdlp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            cfg, storage = config(path, "tiktok_tag"), LocalStorage(path)
+            state = StateStore(path / "state.duckdb")
+            queue = MediaQueue(cfg, storage, state)
+            queue.checkpoints = RemoteCheckpoints(cfg, storage, state, None)
+            scraper = AsyncMock()
+            scraper.last_profile_stats = None
+            scraper.extract_posts.return_value = [parse_item(web_item(11, user="bia"))]
+            download = MagicMock(return_value=b"VIDEO")
+            fetch = AsyncMock(return_value=(b"COVER", "image/jpeg"))
+            with (
+                patch("zeezazum.platforms.downloader.tiktok_media.download_video", download),
+                patch.object(queue.downloader, "_fetch", new=fetch),
+            ):
+                await _scrape_one(
+                    account=SocialAccount("1", "tiktok_tag", "bolsonaro", "https://www.tiktok.com/tag/bolsonaro"),
+                    context=None, scraper=scraper, storage=storage, state=state, queue=queue,
+                    max_posts=60, since_date=None, max_attempts=1, backoff_seconds=0,
+                )
+                await queue.close()
+            self.assertEqual(storage.read_bytes("tiktok_tag/bolsonaro/media/11_0.mp4"), b"VIDEO")
+            self.assertEqual(storage.read_bytes("tiktok_tag/bolsonaro/media/11_1.jpg"), b"COVER")
+            self.assertEqual(download.call_args.args[0], "https://www.tiktok.com/@bia/video/11")
+            self.assertEqual(state.get("1", "bolsonaro", "tiktok_tag").status, "done")
+            self.assertIsNone(state.get("1", "bolsonaro", "tiktok"))
+            posts = storage.read_json("tiktok_tag/bolsonaro/posts.json")
+            self.assertEqual(posts[0]["owner_username"], "bia")
+            state.close()
 
 
 @unittest.skipUnless(os.environ.get("ZEEZAZUM_LIVE") == "1", "teste ao vivo: ZEEZAZUM_LIVE=1")

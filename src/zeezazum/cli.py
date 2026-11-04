@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from urllib.parse import quote, quote_plus
 
 import polars as pl
 import typer
@@ -197,6 +198,53 @@ def backfill(
     )
     _execute(run_scrape(cfg, accounts, extra_posts=extra_posts, fetch_all=all_posts))
     typer.echo("Concluído.")
+
+
+@app.command("tiktok-session")
+def tiktok_session(
+    config: Path = typer.Option(
+        Path("config.yaml"),
+        "--config",
+        help="config.yaml, de onde sai o caminho da sessão (scraping.tiktok_session_file)",
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", help="Onde salvar a sessão (padrão: o do config.yaml)"
+    ),
+    browser: str = typer.Option("chromium", "--browser", help="chromium ou firefox"),
+    tag: str | None = typer.Option(
+        None, "--tag", help="Abre a página dessa hashtag (sem #) em vez de um perfil"
+    ),
+    search: str | None = typer.Option(
+        None, "--search", help="Abre a busca de vídeos por esse texto em vez de um perfil"
+    ),
+) -> None:
+    """Resolve o captcha do TikTok à mão, uma vez. Abre uma janela visível, você desliza
+    o quebra-cabeça (sem fechar o modal pelo X), e a sessão só é salva quando os vídeos aparecem para o `scrape` reaproveitar.
+    Rode numa máquina com interface gráfica e copie o arquivo para o servidor, se preciso."""
+    from zeezazum.platforms.tiktok.session import DEFAULT_SESSION_FILE, capture_session
+
+    if output is None:
+        output = Path(
+            load_config(config).scraping.tiktok_session_file
+            if config.exists()
+            else DEFAULT_SESSION_FILE
+        )
+    urls = []
+    if tag:
+        urls.append(f"https://www.tiktok.com/tag/{quote(tag.lstrip('#'))}")
+    if search:
+        urls.append(f"https://www.tiktok.com/search/video?q={quote_plus(search)}")
+    kwargs = {"urls": urls} if urls else {}
+    ok = capture_session(output, browser_name=browser, echo=typer.echo, **kwargs)
+    if not ok:
+        typer.echo(
+            "Sessão não gravada: o captcha não foi resolvido (vídeos não apareceram). "
+            "Se já existia uma sessão, ela foi mantida. Rode o comando de novo.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    typer.echo(f"Sessão salva em {output}")
+    typer.echo("Pronto: rode o `scrape` de novo.")
 
 
 @app.command("media-sync")

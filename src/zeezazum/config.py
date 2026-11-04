@@ -25,7 +25,9 @@ class ScrapingConfig(BaseModel):
     max_posts: int | None = 60
     since_date: str | None = None
     headless: bool = True
-    session_file: str = "sessions/instagram_storage_state.json"  # só Instagram; TikTok não usa login
+    session_file: str = "sessions/instagram_storage_state.json"  # login do Instagram
+    # sessão do TikTok com o captcha resolvido à mão (`zeezazum tiktok-session`); opcional
+    tiktok_session_file: str = "sessions/tiktok_storage_state.json"
     delay_between_profiles_seconds: tuple[float, float] = (4, 10)
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
@@ -62,7 +64,7 @@ class LoggingConfig(BaseModel):
 
 
 class ZeezazumConfig(BaseModel):
-    platform: Literal["instagram", "tiktok"] = "instagram"
+    platform: Literal["instagram", "tiktok", "tiktok_tag", "tiktok_search"] = "instagram"
     input: InputConfig
     scraping: ScrapingConfig = Field(default_factory=ScrapingConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

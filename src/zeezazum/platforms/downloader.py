@@ -13,6 +13,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from zeezazum.models import MediaItem, MediaKind
+from zeezazum.platforms import TIKTOK_PLATFORMS
 from zeezazum.platforms.tiktok import media as tiktok_media
 from zeezazum.storage.base import Storage
 
@@ -112,7 +113,7 @@ class MediaDownloader:
         ):
             self.results["existing"] += 1
         else:
-            if platform == "tiktok" and task.item.kind == MediaKind.VIDEO:
+            if platform in TIKTOK_PLATFORMS and task.item.kind == MediaKind.VIDEO:
                 # URL do CDN expira e exige cabeçalhos: o yt-dlp resolve a partir da página
                 content = await asyncio.to_thread(
                     tiktok_media.download_video,

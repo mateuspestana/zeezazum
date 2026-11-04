@@ -1,4 +1,4 @@
-platform: instagram   # instagram | tiktok (uma plataforma por execução)
+platform: instagram   # instagram | tiktok | tiktok_tag (hashtags) | tiktok_search (buscas); uma plataforma por execução
 
 input:
   path: data/candidatos_instagram.parquet
@@ -11,7 +11,8 @@ scraping:
   max_posts: 60
   since_date: null       # ex: "2024-01-01" — também usado como corte no scroll
   headless: true
-  session_file: sessions/instagram_storage_state.json   # só Instagram; o TikTok não usa login
+  session_file: sessions/instagram_storage_state.json   # login do Instagram
+  tiktok_session_file: sessions/tiktok_storage_state.json   # opcional: `zeezazum tiktok-session` (captcha à mão)
   delay_between_profiles_seconds: [4, 10]
   retry:
     max_attempts: 3

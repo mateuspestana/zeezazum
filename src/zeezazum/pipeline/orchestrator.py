@@ -22,7 +22,7 @@ from playwright.async_api import BrowserContext, async_playwright
 from zeezazum.config import ZeezazumConfig
 from zeezazum.models import CandidateState, Post, SocialAccount, MediaItem, MediaKind
 from zeezazum.platforms.base import AuthenticationRequired, ProfileUnavailable
-from zeezazum.platforms import REQUIRES_LOGIN, build_scraper
+from zeezazum.platforms import REQUIRES_LOGIN, TIKTOK_PLATFORMS, build_scraper
 from zeezazum.platforms.base import BaseScraper
 from zeezazum.platforms.downloader import MediaDownloader, MediaTask
 from zeezazum.pipeline.state import StateStore
@@ -475,6 +475,17 @@ class RemoteCheckpoints:
                 self.path.unlink(missing_ok=True)
 
 
+def _session_file(config, platform: str) -> Path | None:
+    """Arquivo de sessão da plataforma, se existir em disco."""
+    if platform in TIKTOK_PLATFORMS:
+        path = Path(config.scraping.tiktok_session_file)
+    elif REQUIRES_LOGIN.get(platform):
+        path = Path(config.scraping.session_file)
+    else:
+        return None
+    return path if path.exists() else None
+
+
 async def _run(config, accounts, extra_posts=None, media_only=False, fetch_all=False):
     storage = build_storage(config.storage)
     state, path = _open_state(config, storage)
@@ -495,14 +506,12 @@ async def _run(config, accounts, extra_posts=None, media_only=False, fetch_all=F
                     scrapers: dict = {}
 
                     async def context_for(platform):
-                        # só o Instagram usa sessão autenticada; TikTok navega anônimo
+                        # Instagram: login. TikTok: anônimo, ou com a sessão do captcha
+                        # resolvido à mão, se existir (`zeezazum tiktok-session`)
                         if platform not in contexts:
-                            session = Path(config.scraping.session_file)
-                            use_session = (
-                                REQUIRES_LOGIN.get(platform) and session.exists()
-                            )
+                            session = _session_file(config, platform)
                             contexts[platform] = await browser.new_context(
-                                storage_state=str(session) if use_session else None,
+                                storage_state=str(session) if session else None,
                                 viewport={"width": 1280, "height": 900},
                             )
                         return contexts[platform]
@@ -518,7 +527,9 @@ async def _run(config, accounts, extra_posts=None, media_only=False, fetch_all=F
                         platform = account.platform
                         if platform not in scrapers:
                             scrapers[platform] = build_scraper(
-                                platform, fetch_all=fetch_all
+                                platform,
+                                fetch_all=fetch_all,
+                                session_file=_session_file(config, platform),
                             )
                         await _scrape_one(
                             account=account,

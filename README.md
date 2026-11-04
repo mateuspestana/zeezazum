@@ -13,7 +13,7 @@ funciona sem login e usa o yt-dlp (veja [TikTok](#tiktok)).
 Não depende de um dataset específico: qualquer tabela com identificador e texto
 contendo URLs ou handles pode alimentar a coleta.
 
-**Versão: 0.3.0** · [Histórico de mudanças](CHANGELOG.md)
+**Versão: 0.3.3** · [Histórico de mudanças](CHANGELOG.md)
 
 **Autor:** Matheus C. Pestana ([matheus.pestana@iesp.uerj.br](mailto:matheus.pestana@iesp.uerj.br)).
 
@@ -90,6 +90,110 @@ Perfil inexistente vira erro na hora, sem gastar tentativas (testado: o TikTok
 devolve `statusCode 10221`). O perfil privado deveria ter o mesmo tratamento, mas não
 foi testado contra uma conta privada real. O total declarado de vídeos alimenta o
 aviso de cobertura do `backfill --all`.
+
+### Quando o TikTok bloqueia: resolver o captcha à mão
+
+Se a listagem de um perfil esgotar as tentativas com o captcha na tela, o `scrape`
+para com o código de saída 3 e manda você resolvê-lo uma vez. Numa máquina com
+interface gráfica:
+
+```bash
+uv run zeezazum tiktok-session
+```
+
+Abre uma janela visível no TikTok; deslize o quebra-cabeça até encaixar, espere os
+vídeos do perfil aparecerem e aperte Enter no terminal (sem terminal interativo, como
+um `!comando` no Claude Code, ele salva sozinho quando o captcha some, em até 5 minutos). A sessão (cookies) fica em
+`sessions/tiktok_storage_state.json` (`scraping.tiktok_session_file`), é usada pelo
+navegador e pelo yt-dlp nas próximas execuções, e dá acesso à sessão do navegador: não
+a versione. Depois, repita o comando que parou. Perfis já coletados não são refeitos.
+Num servidor sem tela, gere a sessão no seu computador e copie o arquivo com `scp`.
+
+Para tags, a sessão foi verificada ao vivo (veja abaixo). Para perfis, não se sabe se ela
+reduz os bloqueios do yt-dlp: os testes cobrem a conversão dos cookies, a detecção e o
+fluxo do comando, mas essa comparação não foi medida. O captcha aparece em quase toda abertura anônima do
+perfil (6 de 6 nos testes), mesmo quando a coleta funciona; por isso o Zeezazum só pede
+a resolução quando a listagem falha de fato. Se mesmo com a sessão o bloqueio voltar, o
+aviso diz que a sessão não bastou, e a saída é esperar e repetir (os bloqueios do
+TikTok também passam sozinhos).
+
+### Hashtags do TikTok (`tiktok_tag`)
+
+Para coletar os vídeos de hashtags, use `platform: tiktok_tag`. Cada tag vira
+`tiktok.com/tag/<nome>`; a tabela de entrada pode ter `#bolsonaro`, `bolsonaro` ou o
+link, separados por espaço, vírgula, ponto e vírgula ou quebra de linha:
+
+```bash
+uv run zeezazum prepare --input data/tags.csv --column tags --id-column id \
+  --platform tiktok_tag --output data/tags_tiktok.parquet   # gera tiktok_tag_url
+```
+
+Os vídeos ficam em `output/tiktok_tag/<tag>/`, com o mesmo formato dos perfis
+(`owner_username` diz quem postou). A tag é normalizada para minúsculas.
+
+**A sessão com o captcha resolvido é obrigatória para tags.** Sem ela, o TikTok entrega
+a página da tag mas devolve a lista de vídeos vazia e mostra o captcha (5 de 5 aberturas
+anônimas em novembro de 2026), e o extrator de tags do yt-dlp está quebrado. Com a
+sessão, a coleta funcionou ao vivo: 60 posts de `#bolsonaro` em headless, e o fluxo
+completo (`prepare` + `scrape`, duas tags, 12 vídeos mp4 e 12 capas) levou 21 segundos.
+O Zeezazum lê a lista como o Zeeschuimer: rola a página e captura
+`/api/challenge/item_list/`. Crie a sessão uma vez:
+
+```bash
+uv run zeezazum tiktok-session --tag bolsonaro
+```
+
+A janela "Log in to TikTok" (e pedidos de idade) que aparece na página pode ser ignorada:
+a coleta não interage com ela e não precisa de conta.
+
+Sem a sessão, ou se ela não bastar, o `scrape` para com código 3 e manda você rodar o
+comando acima. Também vale que: a lista de uma tag não é cronológica, então não existe
+"parar no post já conhecido" nem corte antecipado por `since_date` (o filtro por data e
+o `max_posts` valem no final, sobre o que foi capturado); a coleta termina em
+`max_posts`, quando o TikTok avisa o fim da lista ou quando a página para de trazer
+posts novos. **O TikTok limita a profundidade de cada tag**: medido em novembro de 2026,
+`#bolsonaro` entregou 226 posts (de março de 2022 a novembro de 2026), `#lula` 207 e
+`#eleicoes2026` 213, cada uma em cerca de 25 segundos (com a rolagem da 0.3.2; a da 0.3.3
+não foi re-verificada ao vivo nas tags), e a API avisou `hasMore: false`
+ali. Rolar mais não adianta, e `max_posts` acima disso não muda nada. Para ir além, rode
+o `scrape` de novo de tempos em tempos: cada passada pega os posts mais recentes e o que
+já está salvo não é refeito, então o acervo cresce com as execuções. Para o histórico
+completo de quem posta na tag, colete os perfis dos autores (`platform: tiktok`); e os campos de posts de
+foto (slideshow) vêm do formato da API web e não foram verificados ao vivo (nenhum slideshow
+apareceu nos testes); o `profile.json` de uma tag traz só o nome e o total coletado.
+
+### Buscas do TikTok (`tiktok_search`)
+
+Para coletar os vídeos de uma busca, use `platform: tiktok_search`. A tabela de entrada
+pode ter o texto da busca (uma por linha ou separadas por `;`) ou links como
+`tiktok.com/search/video?q=jair+bolsonaro`, `tiktok.com/search?q=...` e
+`tiktok.com/search/jair+bolsonaro`; todos viram a mesma busca:
+
+```bash
+uv run zeezazum prepare --input data/buscas.csv --column busca --id-column id \
+  --platform tiktok_search --output data/buscas_tiktok.parquet  # gera tiktok_search_url
+```
+
+Os vídeos ficam em `output/tiktok_search/jair+bolsonaro/` (minúsculas, espaço vira `+`),
+no mesmo formato dos perfis e das tags. Só a aba de vídeos é coletada. Como nas tags,
+**é preciso a sessão do captcha resolvido**, e a busca tem o seu próprio captcha:
+
+```bash
+uv run zeezazum tiktok-session --tag bolsonaro --search "jair bolsonaro"
+```
+
+`--tag` e `--search` podem vir juntos: as páginas abrem em sequência, na mesma sessão.
+Medido em novembro de 2026: `jair bolsonaro` entregou 149 posts em 34 segundos, e o
+TikTok avisou o fim da lista; `lula` entregou 119. A lista de uma busca também não é
+cronológica, então valem as mesmas regras das tags (sem parada no post já conhecido;
+`since_date` e `max_posts` no final).
+
+**A sessão não dura para sempre.** Depois de umas dez coletas e sondagens seguidas em
+cerca de uma hora, o captcha voltou, inclusive nas tags, e não saiu em 5 minutos. Nesse
+caso o `scrape` para com código 3 e pede para rodar `tiktok-session` de novo. Não se sabe
+se é limite de ritmo ou expiração; para lotes grandes, comece com poucas buscas e tags e
+espace as coletas. O `tiktok-session` só grava a sessão quando o captcha sumiu **e** há
+vídeos na página, e não sobrescreve a sessão existente se falhar: não feche o modal pelo X.
 
 O que esperar dessa via:
 
@@ -184,7 +288,8 @@ entram na contagem de pendências daquela execução.
 | `scraping.since_date` | `null` | Corte de data, por exemplo `"2024-01-01"` |
 | `scraping.headless` | `true` | Navegador sem janela |
 | `platform` | `instagram` | `instagram` ou `tiktok`; uma plataforma por execução |
-| `scraping.session_file` | `sessions/instagram_storage_state.json` | Sessão criada localmente (só Instagram) |
+| `scraping.session_file` | `sessions/instagram_storage_state.json` | Sessão criada localmente (Instagram) |
+| `scraping.tiktok_session_file` | `sessions/tiktok_storage_state.json` | Sessão do TikTok com o captcha resolvido à mão (opcional, veja [TikTok](#tiktok)) |
 | `scraping.delay_between_profiles_seconds` | `[4, 10]` | Espera aleatória entre perfis |
 | `scraping.retry.max_attempts` | `3` | Tentativas para erros gerais de extração |
 | `scraping.retry.backoff_seconds` | `30` | Espera entre essas tentativas |

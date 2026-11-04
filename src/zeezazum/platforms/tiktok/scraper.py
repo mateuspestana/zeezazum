@@ -19,14 +19,18 @@ import asyncio
 import json
 import logging
 import random
+import tempfile
 from contextlib import ExitStack
 from datetime import datetime, timezone
+from functools import partial
+from pathlib import Path
 
 import yt_dlp
 
 from zeezazum.models import Post
 from zeezazum.platforms.base import (
     CHECKPOINT_EVERY,
+    AuthenticationRequired,
     BaseScraper,
     ProfileUnavailable,
     apply_final_filters,
@@ -34,6 +38,10 @@ from zeezazum.platforms.base import (
     sort_newest_first,
 )
 from zeezazum.platforms.tiktok.parser import parse_entry, parse_user_detail
+from zeezazum.platforms.tiktok.session import (
+    CAPTCHA_JS,
+    storage_state_to_netscape,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +53,12 @@ class ListingError(Exception):
     """Falha vinda do yt-dlp ao abrir ou paginar o perfil. É a única coisa que a
     listagem repete: erros de gravação do checkpoint (`PersistenceFailure`) e
     afins passam direto, para não virarem "falha de listagem"."""
+
+
+class CaptchaRequired(AuthenticationRequired):
+    """A listagem esgotou as tentativas com o captcha do TikTok na tela: o usuário
+    precisa resolvê-lo à mão uma vez (`zeezazum tiktok-session`). É a única falha do
+    TikTok que para o lote; as demais viram erro do perfil e são repetidas."""
 
 
 class _YdlLogger:
@@ -63,9 +77,10 @@ class _YdlLogger:
         logger.debug("yt-dlp: %s", msg)
 
 
-def default_ydl_factory() -> yt_dlp.YoutubeDL:
+def default_ydl_factory(cookiefile: str | None = None) -> yt_dlp.YoutubeDL:
     return yt_dlp.YoutubeDL(
         {
+            **({"cookiefile": cookiefile} if cookiefile else {}),
             "quiet": True,
             "no_warnings": True,
             "logger": _YdlLogger(),
@@ -79,17 +94,40 @@ class TikTokScraper(BaseScraper):
     def __init__(
         self,
         *,
-        ydl_factory=default_ydl_factory,
+        ydl_factory=None,
+        session_file: str | Path | None = None,
         listing_attempts: int = 10,
         retry_delay_range: tuple[float, float] = (3.0, 6.0),
         profile_timeout: float = 15.0,
+        captcha_timeout: float = 8.0,
     ):
-        self._ydl_factory = ydl_factory
+        self._session_file = Path(session_file) if session_file else None
+        self._cookie_dir: tempfile.TemporaryDirectory | None = None
+        self._ydl_factory = ydl_factory or self._default_factory()
         self._listing_attempts = listing_attempts
         self._retry_delay_range = retry_delay_range
         self._profile_timeout = profile_timeout
+        self._captcha_timeout = captcha_timeout
         # mesmo formato do Instagram: o orquestrador grava em profile.json
         self.last_profile_stats: dict | None = None
+
+    def _has_session(self) -> bool:
+        return bool(self._session_file and self._session_file.exists())
+
+    def _default_factory(self):
+        """yt-dlp com os cookies da sessão salva, se houver. Os cookies vão para um
+        arquivo temporário (o yt-dlp reescreve o arquivo de cookies ao fechar)."""
+        if not self._has_session():
+            return default_ydl_factory
+        try:
+            state = json.loads(self._session_file.read_text())
+        except (OSError, ValueError):
+            logger.warning("Sessão do TikTok ilegível (%s); seguindo sem ela", self._session_file)
+            return default_ydl_factory
+        self._cookie_dir = tempfile.TemporaryDirectory(prefix="zeezazum-tiktok-")
+        cookiefile = Path(self._cookie_dir.name) / "cookies.txt"
+        cookiefile.write_text(storage_state_to_netscape(state))
+        return partial(default_ydl_factory, str(cookiefile))
 
     async def extract_posts(
         self,
@@ -116,6 +154,7 @@ class TikTokScraper(BaseScraper):
         captured: dict[str, Post] = {}
         await self._list_with_retries(
             handle,
+            context,
             captured,
             max_posts=max_posts,
             since_date=since_date,
@@ -165,6 +204,35 @@ class TikTokScraper(BaseScraper):
         logger.info("Perfil @%s: TikTok não entregou os dados da página", handle)
         return None
 
+    async def _captcha_on_screen(self, context, handle: str) -> bool:
+        """Reabre o perfil e espera alguns segundos pelo captcha (ele aparece um pouco
+        depois do carregamento). Só roda quando a listagem já esgotou as tentativas."""
+        if context is None:
+            return False
+        page = await context.new_page()
+        try:
+            await page.goto(
+                f"https://www.tiktok.com/@{handle}",
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self._captcha_timeout
+            while True:
+                try:
+                    if await page.evaluate(CAPTCHA_JS) is True:
+                        return True
+                except Exception:
+                    pass  # a página recarregou (desafio JS): tenta de novo
+                if loop.time() >= deadline:
+                    return False
+                await asyncio.sleep(1)
+        except Exception as exc:
+            logger.debug("Perfil @%s: sondagem de captcha falhou: %s", handle, exc)
+            return False
+        finally:
+            await page.close()
+
     @staticmethod
     def _check_profile(handle: str, profile: dict) -> None:
         status = profile.get("status_code")
@@ -180,6 +248,7 @@ class TikTokScraper(BaseScraper):
     async def _list_with_retries(
         self,
         handle: str,
+        context,
         captured: dict[str, Post],
         *,
         max_posts,
@@ -214,6 +283,8 @@ class TikTokScraper(BaseScraper):
                     delay = random.uniform(*self._retry_delay_range) * min(attempt, 6)
                     await asyncio.sleep(delay)
 
+        if not captured and await self._captcha_on_screen(context, handle):
+            raise CaptchaRequired(self._captcha_message(handle))
         if captured or profile_verified:
             # lista incompleta ou bloqueio temporário: erro comum, o orquestrador repete
             raise RuntimeError(
@@ -225,6 +296,19 @@ class TikTokScraper(BaseScraper):
             "perfil inexistente, privado ou bloqueio temporário do TikTok "
             f"({last_error})"
         ) from last_error
+
+    def _captcha_message(self, handle: str) -> str:
+        motivo = (
+            f"A sessão salva em {self._session_file} não bastou (pode ter expirado)."
+            if self._has_session()
+            else "O TikTok está pedindo um captcha."
+        )
+        return (
+            f"O TikTok bloqueou a listagem de @{handle}. {motivo} Resolva o captcha uma "
+            "vez, à mão: rode `uv run zeezazum tiktok-session`, deslize o quebra-cabeça "
+            "na janela que abrir e aperte Enter; depois repita o comando anterior. "
+            "Perfis já coletados não são refeitos."
+        )
 
     async def _iterate(
         self,

@@ -5,6 +5,99 @@ Todas as mudanças notáveis deste projeto são documentadas aqui.
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e o versionamento segue [SemVer](https://semver.org/lang/pt-BR/).
 
+## [0.3.3] — 2026-11-04
+
+Busca de vídeos do TikTok. Esta é a versão publicada (tag e release) das iterações
+0.3.1, 0.3.2 e 0.3.3, que foram desenvolvidas em sequência no mesmo dia.
+
+### Adicionado
+- Buscas do TikTok: `platform: tiktok_search` e `prepare --platform tiktok_search`
+  (gera `tiktok_search_url`). A entrada aceita `tiktok.com/search/video?q=...`,
+  `tiktok.com/search?q=...`, `tiktok.com/search/jair+bolsonaro` ou texto simples (uma
+  busca por linha ou separada por `;`). Saída em `output/tiktok_search/jair+bolsonaro/`
+  (minúsculas, espaço vira `+`, caracteres reservados viram `%XX`).
+- Lê a aba de vídeos (`/search/video`) capturando `/api/search/item/full`, com o mesmo
+  scraper de rolagem das tags. Anúncios (`isAd`) são descartados.
+- `zeezazum tiktok-session --search "<texto>"`; `--tag` e `--search` podem vir juntos e
+  as páginas são abertas em sequência, na mesma sessão.
+
+### Alterado
+- A rolagem agora também traz o último vídeo para a vista (`scrollIntoView`). Na busca o
+  documento não rola (o grid rola num contêiner interno) e só isso dispara as páginas
+  seguintes: 24 posts com `scrollTo`, 144 com `scrollIntoView` em 10 passos.
+- `tiktok-session` só grava a sessão quando o captcha sumiu **e** há vídeos na página, e
+  nunca sobrescreve uma sessão existente quando falha (grava em arquivo temporário e
+  troca no fim). Antes bastava o captcha sumir, o que também acontece ao fechar o modal
+  pelo X: uma sessão inválida substituiu uma que funcionava.
+
+### Verificado ao vivo (2026-11-04)
+- Busca `jair bolsonaro`: 149 posts em 34 s, com o TikTok avisando o fim da lista
+  (`has_more: 0`), de nov/2025 a nov/2026, 127 autores. Busca `lula`: 119 posts.
+- **Não re-verificado:** a rolagem nova (`scrollIntoView`) vale também para as tags, mas
+  nenhuma coleta de tag foi concluída depois da mudança: a sessão foi bloqueada antes
+  (veja abaixo). Os números de profundidade das tags (0.3.2) são da rolagem anterior.
+
+### Limitações conhecidas
+- **A sessão não é duradoura.** Depois de umas dez coletas e sondagens seguidas em cerca
+  de uma hora (várias buscas e tags), o captcha voltou, inclusive nas tags, e não saiu
+  após 5 minutos de espera. Nesse caso o `scrape` para com código 3 e manda rodar
+  `tiktok-session` de novo. Não foi medido se é limite de ritmo ou expiração; para lotes
+  grandes, espaçar as coletas e começar com poucas buscas/tags.
+- Uma busca pode parar antes do fim declarado pelo TikTok (a `lula` parou em 119) quando
+  o bloqueio volta no meio da paginação; rodar de novo completa o que faltou.
+- Busca é só a aba de vídeos; resultados de usuários, lives e fotos não são coletados.
+- Posts de foto (slideshow) em buscas e tags seguem sem verificação ao vivo.
+
+## [0.3.2] — 2026-11-04 (iteração; publicada na 0.3.3)
+
+### Adicionado
+- Hashtags do TikTok: `platform: tiktok_tag` e `prepare --platform tiktok_tag` (gera
+  `tiktok_tag_url`). Aceita `tiktok.com/tag/<nome>`, `#nome` ou a palavra solta, com
+  nomes acentuados. Saída em `output/tiktok_tag/<tag>/`; estado e mídia separados por
+  plataforma.
+- Leitura da lista pela rolagem da página da tag, capturando
+  `/api/challenge/item_list/` (como o Zeeschuimer). Vídeo pelo yt-dlp e capa por HTTP;
+  slideshows guardam as fotos. A coleta termina em `max_posts`, quando o TikTok avisa o
+  fim da lista (`hasMore: false`) ou quando a página para de trazer posts novos.
+- `zeezazum tiktok-session --tag <nome>` abre a página da tag para resolver o captcha.
+- `tiktok-session` sem terminal interativo (ex.: `!comando` no Claude Code) não aborta:
+  observa a página e salva sozinho (até 5 minutos).
+
+### Corrigido durante a validação
+- A rolagem usa JavaScript em vez da roda do mouse: o modal de login do TikTok prende a
+  roda, e a coleta parava em 2 lotes (60 posts).
+
+### Verificado ao vivo
+- Com a sessão do captcha resolvido: 60 posts de `#bolsonaro` em headless; `prepare` +
+  `scrape` com `#bolsonaro` e `#Lula` (6 posts cada) em 21 s, 12 mp4 válidos e 12 capas
+  JPEG. Sem sessão: captcha em 5 de 5 aberturas, e o scrape para com código 3.
+- Profundidade: o TikTok corta cada tag em torno de 210 a 245 posts. `#bolsonaro` 226
+  (mar/2022 a nov/2026), `#lula` 207, `#eleicoes2026` 213, cerca de 25 s cada.
+
+### Limitações conhecidas
+- Tags exigem a sessão (`zeezazum tiktok-session --tag <nome>`).
+- A lista de uma tag não é cronológica: sem parada no post já conhecido e sem corte
+  antecipado por `since_date` (o filtro vale no final). Para acumular além do teto,
+  rodar o `scrape` periodicamente: o que já está salvo não é refeito.
+- O `profile.json` de uma tag traz só o nome e o total coletado.
+
+## [0.3.1] — 2026-11-04 (iteração; publicada na 0.3.3)
+
+### Adicionado
+- `zeezazum tiktok-session`: abre uma janela visível, você resolve o captcha do TikTok
+  à mão uma vez e a sessão é salva em `scraping.tiktok_session_file`
+  (padrão `sessions/tiktok_storage_state.json`).
+- Se existir, a sessão é usada pelo navegador e entregue ao yt-dlp como cookies.
+- Quando a listagem de um perfil esgota as tentativas e o captcha está na tela, o
+  `scrape` para com código de saída 3 e orienta a rodar `tiktok-session`. Sem captcha
+  na tela, o erro continua sendo comum (o perfil fica com erro e é repetido depois).
+
+### Limitações conhecidas
+- Não foi medido se a sessão reduz os bloqueios do yt-dlp na coleta de perfis.
+- O captcha aparece em quase toda abertura anônima do perfil (6 de 6), então vê-lo não
+  basta para parar: o pedido só sai se a listagem falhar de fato.
+- O download dos vídeos continua anônimo (não usa a sessão).
+
 ## [0.3.0] — 2026-11-04
 
 O Zeezazum passa a coletar também o TikTok, sem login.

@@ -132,3 +132,89 @@ def parse_user_detail(udr: dict) -> dict | None:
         "following": _int(stats.get("followingCount")),
         "posts_total": _int(stats.get("videoCount")),
     }
+
+
+def _author(item: dict) -> tuple[str | None, str | None]:
+    """(uniqueId, id numérico) do autor; o campo vem como dict ou, em alguns payloads,
+    como o próprio uniqueId."""
+    author = item.get("author")
+    if isinstance(author, dict):
+        return author.get("uniqueId"), author.get("id") or item.get("authorId")
+    return (author if isinstance(author, str) else None), item.get("authorId")
+
+
+def parse_item(item: dict) -> Post | None:
+    """Item da API web (`/api/challenge/item_list/`: lista de vídeos de uma hashtag)
+    -> `Post`. É o mesmo formato que o Zeeschuimer captura. Devolve None para o que
+    não é post (sem id/autor) e para lives (`liveRoomInfo`).
+
+    Mapeamento conforme o `modules/tiktok.js` do Zeeschuimer e a API web; NÃO
+    verificado contra uma resposta real (o TikTok só entrega essa lista com a sessão
+    do captcha resolvido, e nenhuma sessão assim estava disponível ao escrever)."""
+    if not isinstance(item, dict) or "liveRoomInfo" in item or item.get("isAd"):
+        return None  # lives e anúncios (a busca pode misturar `isAd`)
+    post_id = str(item.get("id") or "")
+    username, owner_id = _author(item)
+    if not post_id.isdigit() or not username:
+        return None
+
+    image_post = item.get("imagePost") or {}
+    images = [
+        urls[0]
+        for image in image_post.get("images") or []
+        if isinstance(image, dict)
+        and (urls := (image.get("imageURL") or {}).get("urlList"))
+    ]
+    is_photo = bool(image_post)
+    kind = "photo" if is_photo else "video"
+    post_url = f"https://www.tiktok.com/@{username}/{'photo' if is_photo else 'video'}/{post_id}"
+
+    video = item.get("video") or {}
+    media: list[MediaItem] = []
+    if is_photo:
+        media = [MediaItem(kind=MediaKind.IMAGE, url=u, index=i) for i, u in enumerate(images)]
+    else:
+        media.append(MediaItem(kind=MediaKind.VIDEO, url=post_url, index=0))
+        cover = next(
+            (video[k] for k in ("originCover", "cover", "dynamicCover") if video.get(k)), None
+        )
+        if cover:
+            media.append(MediaItem(kind=MediaKind.IMAGE, url=cover, index=1))
+
+    caption = item.get("desc") or None
+    text = caption or ""
+    stats = item.get("stats") or {}
+    music = item.get("music") or {}
+    created = item.get("createTime")
+    try:
+        created = int(created)
+    except (TypeError, ValueError):
+        created = None
+    hashtags = [
+        t["hashtagName"]
+        for t in item.get("textExtra") or []
+        if isinstance(t, dict) and t.get("hashtagName")
+    ] or _HASHTAG_RE.findall(text)
+    return Post(
+        shortcode=post_id,
+        post_url=post_url,
+        timestamp=datetime.fromtimestamp(created, tz=timezone.utc) if created else None,
+        caption=caption,
+        media=tuple(media),
+        raw=item,
+        metrics={
+            "like_count": _int(stats.get("diggCount")),
+            "comment_count": _int(stats.get("commentCount")),
+            "view_count": _int(stats.get("playCount")),
+            "share_count": _int(stats.get("shareCount")),
+            "save_count": _int(stats.get("collectCount")),
+            "video_duration": video.get("duration") if not is_photo else None,
+            "media_type_label": kind,
+            "hashtags": hashtags,
+            "mentions": _MENTION_RE.findall(text),
+            "audio_title": music.get("title"),
+            "audio_artist": music.get("authorName"),
+            "owner_username": username,
+            "owner_id": owner_id,
+        },
+    )
