@@ -8,8 +8,9 @@
 Coleta posts, imagens e vídeos do Instagram e do TikTok a partir de tabelas de
 contas. No Instagram, usa Playwright para capturar as respostas de rede enquanto
 navega pelo perfil, inspirado no
-[Zeeschuimer](https://github.com/digitalmethodsinitiative/zeeschuimer). O TikTok
-funciona sem login e usa o yt-dlp (veja [TikTok](#tiktok)).
+[Zeeschuimer](https://github.com/digitalmethodsinitiative/zeeschuimer). No TikTok,
+perfis funcionam sem login, via yt-dlp; hashtags e buscas rolam a página e exigem uma
+sessão com o captcha resolvido à mão (veja [TikTok](#tiktok)).
 Não depende de um dataset específico: qualquer tabela com identificador e texto
 contendo URLs ou handles pode alimentar a coleta.
 
@@ -286,7 +287,7 @@ entram na contagem de pendências daquela execução.
 | `scraping.max_posts` | `60` | Limite por perfil; `null` remove esse limite |
 | `scraping.since_date` | `null` | Corte de data, por exemplo `"2024-01-01"` |
 | `scraping.headless` | `true` | Navegador sem janela |
-| `platform` | `instagram` | `instagram` ou `tiktok`; uma plataforma por execução |
+| `platform` | `instagram` | `instagram`, `tiktok` (perfis), `tiktok_tag` (hashtags) ou `tiktok_search` (buscas); uma plataforma por execução |
 | `scraping.session_file` | `sessions/instagram_storage_state.json` | Sessão criada localmente (Instagram) |
 | `scraping.tiktok_session_file` | `sessions/tiktok_storage_state.json` | Sessão do TikTok com o captcha resolvido à mão (opcional, veja [TikTok](#tiktok)) |
 | `scraping.delay_between_profiles_seconds` | `[4, 10]` | Espera aleatória entre perfis |
@@ -454,7 +455,7 @@ uv run python -m unittest discover -s tests -v
 Os testes usam arquivos temporários e simulam rede, navegador e backend remoto;
 não acessam contas reais nem buckets AWS.
 
-O código está em `src/zeezazum`: `input/` prepara contas, `platforms/instagram/`
-extrai e baixa conteúdo, `pipeline/` coordena estado e recuperação, e `storage/`
+O código está em `src/zeezazum`: `input/` prepara contas, `platforms/instagram/` e
+`platforms/tiktok/` extraem e baixam conteúdo, `pipeline/` coordena estado e recuperação, e `storage/`
 implementa os destinos local e S3. A interface de scraper está em `platforms/base.py`;
 configuração e orquestração ainda precisam ser adaptadas para suportar outra rede.

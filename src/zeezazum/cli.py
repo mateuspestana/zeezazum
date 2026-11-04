@@ -58,7 +58,7 @@ def prepare(
         ..., "--id-column", help="Coluna identificadora única de cada linha"
     ),
     platform: str = typer.Option(
-        "instagram", "--platform", help="Plataforma a extrair: instagram ou tiktok"
+        "instagram", "--platform", help="Plataforma a extrair: instagram, tiktok, tiktok_tag ou tiktok_search"
     ),
     extra_columns: str = typer.Option(
         "",
@@ -70,7 +70,7 @@ def prepare(
         ..., "--output", help="Onde salvar a tabela normalizada"
     ),
 ) -> None:
-    """Extrai, de uma coluna de texto livre, só as contas de uma plataforma (Instagram ou TikTok),
+    """Extrai, de uma coluna de texto livre, só as contas, tags ou buscas de uma plataforma (Instagram ou TikTok),
     deduplicadas por linha — gera uma tabela pequena e limpa para alimentar `scrape`.
     Opcionalmente carrega junto outras colunas de identificação da tabela de origem
     (nome, UF, partido etc.), úteis pra conferir/filtrar antes de raspar."""
