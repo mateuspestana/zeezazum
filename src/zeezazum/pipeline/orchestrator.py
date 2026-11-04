@@ -52,6 +52,10 @@ def _open_state(
     return StateStore(tmp_path), tmp_path
 
 
+# Em "baixar tudo" o scroll só desiste após muito mais rodadas sem posts novos.
+_FETCH_ALL_STAGNANT_SCROLLS = 25
+
+
 def _parse_since_date(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -194,8 +198,11 @@ async def _scrape_one(
     max_attempts: int,
     backoff_seconds: int,
     extra_posts: int | None = None,
+    fetch_all: bool = False,
 ) -> None:
-    """`extra_posts=None` (padrão): modo incremental — para assim que reencontra o
+    """`fetch_all=True`: histórico completo — ignora `max_posts`, `since_date` e o
+    early-stop, e rola até o Instagram parar de entregar posts.
+    `extra_posts=None` (padrão): modo incremental — para assim que reencontra o
     post mais recente já conhecido (seguro pra cron, só traz posts novos).
     `extra_posts=N`: modo backfill — ignora esse early-stop e raspa até acumular
     `total_já_conhecido + N` posts, aprofundando no histórico de contas já raspadas."""
@@ -204,7 +211,11 @@ async def _scrape_one(
     if existing:
         existing.total_posts_seen = _count_persisted(storage, candidate_folder)
 
-    if extra_posts is None:
+    if fetch_all:
+        stop_at_post_id = None
+        effective_max_posts = None
+        since_date = None
+    elif extra_posts is None:
         stop_at_post_id = existing.newest_post_id if existing else None
         effective_max_posts = max_posts
     else:
@@ -275,6 +286,14 @@ async def _scrape_one(
 
     await flush(posts)  # posts já persistidos em checkpoints não contam como novos
     total_after_merge = _count_persisted(storage, candidate_folder)
+    stats = scraper.last_profile_stats
+    if fetch_all and stats and total_after_merge < stats.get("posts_total", 0):
+        logger.warning(
+            "@%s: %d posts salvos de %d declarados no perfil; rode `backfill --all` de novo para tentar completar",
+            account.handle,
+            total_after_merge,
+            stats["posts_total"],
+        )
     _write_profile_stats(
         storage,
         candidate_folder,
@@ -447,7 +466,7 @@ class RemoteCheckpoints:
                 self.path.unlink(missing_ok=True)
 
 
-async def _run(config, accounts, extra_posts=None, media_only=False):
+async def _run(config, accounts, extra_posts=None, media_only=False, fetch_all=False):
     storage = build_storage(config.storage)
     state, path = _open_state(config, storage)
     media = MediaQueue(config, storage, state)
@@ -468,7 +487,10 @@ async def _run(config, accounts, extra_posts=None, media_only=False):
                         storage_state=str(session) if session.exists() else None,
                         viewport={"width": 1280, "height": 900},
                     )
-                    scraper = InstagramScraper(scroll_delay_range=(1.5, 3.5))
+                    scraper = InstagramScraper(
+                        scroll_delay_range=(1.5, 3.5),
+                        max_stagnant_scrolls=_FETCH_ALL_STAGNANT_SCROLLS if fetch_all else None,
+                    )
                     for i, account in enumerate(accounts):
                         if i:
                             await asyncio.sleep(
@@ -489,6 +511,7 @@ async def _run(config, accounts, extra_posts=None, media_only=False):
                             max_attempts=config.scraping.retry.max_attempts,
                             backoff_seconds=config.scraping.retry.backoff_seconds,
                             extra_posts=extra_posts,
+                            fetch_all=fetch_all,
                         )
                 finally:
                     await browser.close()
@@ -514,9 +537,13 @@ async def _run(config, accounts, extra_posts=None, media_only=False):
 
 
 async def run_scrape(
-    config: ZeezazumConfig, accounts: list[SocialAccount], *, extra_posts=None
+    config: ZeezazumConfig,
+    accounts: list[SocialAccount],
+    *,
+    extra_posts=None,
+    fetch_all=False,
 ):
-    await _run(config, accounts, extra_posts=extra_posts)
+    await _run(config, accounts, extra_posts=extra_posts, fetch_all=fetch_all)
 
 
 async def run_media_sync(

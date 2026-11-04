@@ -61,8 +61,14 @@ _MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 
 
 class InstagramScraper(BaseScraper):
-    def __init__(self, *, scroll_delay_range: tuple[float, float] = (1.5, 3.5)):
+    def __init__(
+        self,
+        *,
+        scroll_delay_range: tuple[float, float] = (1.5, 3.5),
+        max_stagnant_scrolls: int | None = None,
+    ):
         self._scroll_delay_range = scroll_delay_range
+        self._max_stagnant_scrolls = max_stagnant_scrolls or _MAX_STAGNANT_SCROLLS
         # estatísticas do perfil da última extração (seguidores, seguindo, total de posts);
         # o orquestrador grava em profile.json para medir cobertura da raspagem.
         self.last_profile_stats: dict | None = None
@@ -175,7 +181,7 @@ class InstagramScraper(BaseScraper):
 
                 if len(captured) == previous_count:
                     stagnant_rounds += 1
-                    if stagnant_rounds >= _MAX_STAGNANT_SCROLLS:
+                    if stagnant_rounds >= self._max_stagnant_scrolls:
                         break
                 else:
                     stagnant_rounds = 0

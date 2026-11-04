@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -272,7 +273,6 @@ class IntegrationTests(RecoveryFixture):
 
     async def test_known_post_url_refresh_preserves_metrics(self):
         from zeezazum.pipeline.orchestrator import _persist_posts
-        from datetime import datetime, timezone
 
         (self.path / "instagram/alice/posts.json").unlink()
         old = Post(
@@ -353,6 +353,38 @@ class IntegrationTests(RecoveryFixture):
         self.assertEqual(state.get("1", "bob").newest_post_id, "bobpost")
         self.assertIsNone(scraper.extract_posts.call_args.kwargs["stop_at_post_id"])
         self.assertEqual(scraper.extract_posts.call_args.kwargs["max_posts"], 3)
+        await queue.close()
+        state.close()
+
+    async def test_fetch_all_ignora_limites_e_avisa_cobertura(self):
+        state = StateStore(self.path / "state.duckdb")
+        state.upsert(
+            CandidateState("1", "alice", "done", newest_post_id="abc", total_posts_seen=1)
+        )
+        queue = MediaQueue(self.cfg, self.storage, state)
+        queue.checkpoints = RemoteCheckpoints(self.cfg, self.storage, state, None)
+        scraper = AsyncMock()
+        scraper.last_profile_stats = {"posts_total": 10}
+        scraper.extract_posts.return_value = [Post("abc", "url", None, None, ())]
+        with self.assertLogs("zeezazum.pipeline.orchestrator", "WARNING") as logs:
+            await _scrape_one(
+                account=self.account,
+                context=None,
+                scraper=scraper,
+                storage=self.storage,
+                state=state,
+                queue=queue,
+                max_posts=60,
+                since_date=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                max_attempts=3,
+                backoff_seconds=0,
+                fetch_all=True,
+            )
+        kwargs = scraper.extract_posts.call_args.kwargs
+        self.assertIsNone(kwargs["max_posts"])
+        self.assertIsNone(kwargs["since_date"])
+        self.assertIsNone(kwargs["stop_at_post_id"])
+        self.assertIn("1 posts salvos de 10", logs.output[0])
         await queue.close()
         state.close()
 

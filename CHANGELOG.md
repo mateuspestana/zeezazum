@@ -5,6 +5,16 @@ Todas as mudanças notáveis deste projeto são documentadas aqui.
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e o versionamento segue [SemVer](https://semver.org/lang/pt-BR/).
 
+## [0.2.5] — 2026-11-04
+
+### Adicionado
+- `zeezazum backfill --all`: baixa o histórico completo de cada perfil. Ignora
+  `max_posts`, `since_date` e o early-stop, e só encerra após 25 rodadas de scroll
+  sem posts novos (antes eram 8).
+- Aviso no log quando o total salvo fica abaixo do número de posts declarado no
+  perfil; rodar `backfill --all` de novo continua de onde parou (dedup por shortcode).
+- Teste do modo `fetch_all`.
+
 ## [0.2.4] — 2026-11-03
 
 Sincronização com o [Zeeschuimer](https://github.com/digitalmethodsinitiative/zeeschuimer)

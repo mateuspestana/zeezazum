@@ -11,7 +11,7 @@ inspirado no [Zeeschuimer](https://github.com/digitalmethodsinitiative/zeeschuim
 Não depende de um dataset específico: qualquer tabela com identificador e texto
 contendo URLs ou handles pode alimentar a coleta.
 
-**Versão: 0.2.4** · [Histórico de mudanças](CHANGELOG.md)
+**Versão: 0.2.5** · [Histórico de mudanças](CHANGELOG.md)
 
 **Autor:** Matheus C. Pestana ([matheus.pestana@iesp.uerj.br](mailto:matheus.pestana@iesp.uerj.br)).
 
@@ -74,6 +74,7 @@ Use `uv run zeezazum COMANDO --help` para consultar as opções.
 ```bash
 uv run zeezazum scrape --config config.yaml
 uv run zeezazum backfill --config config.yaml --extra-posts 20
+uv run zeezazum backfill --config config.yaml --all   # histórico completo
 uv run zeezazum media-sync --config config.yaml
 ```
 
@@ -83,6 +84,13 @@ uv run zeezazum media-sync --config config.yaml
 não aprofunda automaticamente uma conta já coletada: use `backfill` para isso.
 O backfill busca até o total já salvo mais `extra-posts`; contas ainda sem estado
 usam o `max_posts` configurado. O corte `since_date` também se aplica ao backfill.
+
+Para baixar **todo** o histórico, use `backfill --all`: ignora `max_posts`, `since_date`
+e o early-stop, e só encerra quando o Instagram para de entregar posts (25 rodadas de
+scroll sem novidade). Ao final, o log avisa se o total salvo ficou abaixo do número de
+posts declarado no perfil; rodar o comando de novo continua de onde parou, pois os
+posts são deduplicados. Perfis grandes levam horas: o scroll tem pausas longas de
+propósito, e a sessão pode expirar (código 3).
 
 Posts são deduplicados por shortcode. Durante scrolls longos há checkpoints a
 cada 200 posts capturados; o marcador incremental só avança ao concluir o perfil.

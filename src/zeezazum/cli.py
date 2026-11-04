@@ -154,10 +154,16 @@ def backfill(
     config: Path = typer.Option(
         Path("config.yaml"), "--config", help="Caminho do config.yaml"
     ),
-    extra_posts: int = typer.Option(
-        ...,
+    extra_posts: int | None = typer.Option(
+        None,
         "--extra-posts",
         help="Quantos posts a mais buscar, além do que já foi salvo, por conta.",
+    ),
+    all_posts: bool = typer.Option(
+        False,
+        "--all",
+        help="Baixa o histórico completo: ignora max_posts e since_date e só para "
+        "quando o Instagram deixa de entregar posts.",
     ),
 ) -> None:
     """Aprofunda o histórico de contas já raspadas antes, buscando posts mais antigos
@@ -165,7 +171,9 @@ def backfill(
     recente já conhecido. Para uma conta com N posts já salvos, busca até N + EXTRA_POSTS
     no total (os N já salvos são deduplicados, então só os realmente novos são baixados).
     Contas ainda não raspadas usam o `max_posts` normal do config.yaml."""
-    if extra_posts <= 0:
+    if all_posts == (extra_posts is not None):
+        raise typer.BadParameter("Use --extra-posts N ou --all (um dos dois).")
+    if extra_posts is not None and extra_posts <= 0:
         raise typer.BadParameter("--extra-posts precisa ser um número positivo.")
 
     cfg, accounts = _load_config_and_accounts(config)
@@ -173,10 +181,9 @@ def backfill(
         typer.echo("Nenhuma conta de Instagram encontrada no input. Nada a fazer.")
         raise typer.Exit(code=0)
 
-    typer.echo(
-        f"Aprofundando histórico de {len(accounts)} perfis do Instagram (+{extra_posts} posts cada)..."
-    )
-    _execute(run_scrape(cfg, accounts, extra_posts=extra_posts))
+    alvo = "histórico completo" if all_posts else f"+{extra_posts} posts cada"
+    typer.echo(f"Aprofundando histórico de {len(accounts)} perfis do Instagram ({alvo})...")
+    _execute(run_scrape(cfg, accounts, extra_posts=extra_posts, fetch_all=all_posts))
     typer.echo("Concluído.")
 
 
